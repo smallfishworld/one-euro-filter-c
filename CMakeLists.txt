@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(one_euro_filter VERSION 2.0.0 LANGUAGES C)
+project(one_euro_filter VERSION 3.0.0 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(OEF_STANDALONE ON)

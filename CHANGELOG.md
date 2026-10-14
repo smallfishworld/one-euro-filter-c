@@ -2,6 +2,26 @@
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] - 2026-10-14
+
+### Breaking changes
+- Removed the `_ex` suffixes: the status-returning functions are now the plain
+  names (`oef_update`, `oef_auto_init2d`, ...).
+- Removed all `bool` convenience wrappers.
+- Removed `max_cutoff_hz` from `oef_config_t`; the standard three parameters remain.
+- Removed the `OEF_E_STATE`, `OEF_E_RANGE` and `OEF_E_CLOCK` status codes;
+  unusable clock readings now surface as `OEF_E_TIME`.
+- The clock callback is now `double (*)(void *context)`; `oef_clock_monotonic()`
+  returns `double` directly and returns `0.0` on unsupported platforms.
+- Removed per-sample defensive state re-validation; documented that state
+  written by the library is trusted after `oef_init*()`.
+- Removed the standalone Makefile; CMake is the single build system.
+
+### Added
+- `NULL` config arguments now select `oef_config_default()` everywhere, making
+  a minimal integration three lines.
+- README documents copy-the-files integration without any build system.
+
 ## [2.0.0] - 2026-10-14
 
 ### Breaking changes
