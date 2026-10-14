@@ -8,8 +8,11 @@ LDLIBS ?= -lm
 BUILD_DIR := build-make
 LIB := $(BUILD_DIR)/libone_euro_filter.a
 OBJ := $(BUILD_DIR)/one_euro_filter.o
+EXAMPLES := $(BUILD_DIR)/oef_example_1d \
+            $(BUILD_DIR)/oef_example_2d \
+            $(BUILD_DIR)/oef_example_3d
 
-.PHONY: all test example clean
+.PHONY: all test examples example clean
 all: $(LIB)
 
 $(BUILD_DIR):
@@ -27,11 +30,19 @@ $(BUILD_DIR)/oef_tests: tests/test_one_euro_filter.c $(LIB)
 test: $(BUILD_DIR)/oef_tests
 	./$(BUILD_DIR)/oef_tests
 
-$(BUILD_DIR)/oef_acoustic_example: examples/acoustic_imaging.c $(LIB)
+$(BUILD_DIR)/oef_example_1d: examples/one_dimensional.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
-example: $(BUILD_DIR)/oef_acoustic_example
-	./$(BUILD_DIR)/oef_acoustic_example
+$(BUILD_DIR)/oef_example_2d: examples/two_dimensional.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(BUILD_DIR)/oef_example_3d: examples/three_dimensional.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
+examples: $(EXAMPLES)
+
+example: examples
+	@for executable in $(EXAMPLES); do ./$$executable || exit 1; done
 
 clean:
 	rm -rf $(BUILD_DIR)
