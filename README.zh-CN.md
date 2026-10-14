@@ -235,6 +235,49 @@ if (oef_update3d(&filter, raw, dt_seconds, &smooth)) {
 - 输入单位切换、追踪不相关的新对象、采集重新开始时，建议调用相应的 `reset`。
 - 一欧元滤波擅长**时间方向上的噪声平滑**，不能自行消除异常离群点或上游定位算法的不连续，也无法保证静止输入的输出完全冻结。
 
+
+### 4.1 完整错误码和健壮性接口（v1.1.0）
+
+为了满足生产级 C 库的可诊断性要求，新增了返回 **`oef_status_t`** 的 `*_ex` API：成功时 `OEF_OK == 0`，错误时返回**库自己定义的负数错误码**，不依赖系统 `errno`。
+
+| 状态码 | 数值 | 说明 |
+| --- | ---: | --- |
+| `OEF_OK` | 0 | 成功 |
+| `OEF_E_NULL` | -1 | 必须提供的指针为 NULL |
+| `OEF_E_CONFIG` | -2 | 新配置参数非法 |
+| `OEF_E_INPUT` | -3 | 输入包含 NaN/无穷大 |
+| `OEF_E_TIME` | -4 | 采样间隔非法（非正数、NaN/Inf） |
+| `OEF_E_STATE` | -5 | 未正确初始化或已有状态/生效配置损坏 |
+| `OEF_E_RANGE` | -6 | 计算结果超出可保存的 float 数值范围 |
+
+```c
+oef_config_t cfg = oef_config_default();
+oef_filter2d_t filter;
+oef_status_t st = oef_init2d_ex(&filter, &cfg);
+
+oef_vec2_t position = {100.7f, 199.6f};
+oef_vec2_t filtered;
+if (st == OEF_OK) {
+    st = oef_update2d_ex(&filter, position, 1.0f / 60.0f, &filtered);
+}
+if (st != OEF_OK) {
+    /* 可记录 oef_status_name(st) 和 oef_status_message(st)。 */
+    /* 两者返回静态字符串，无需释放，不依赖动态内存。 */
+} else {
+    /* 使用 filtered.x、filtered.y。 */
+}
+```
+
+**错误处理约定：** 非法配置、空指针、NaN/Inf、无效时间间隔、历史状态异常、计算溢出均不会推进滤波器历史状态，也不会写坏输出。核心计算改用 `double` 中间变量，存回 `float` 前检查是否可表示。调用方必须**先初始化实例**，并确保多个线程不会无保护地同时修改同一个实例。
+
+**向后兼容：** 原 v1.0 版本返回 `bool` 的初始化、参数修改、更新接口全部保留（成功仍返回 `true`）；原 `void` 复位接口也保留。需要精确获知原因时使用对应的 `*_ex` 版本。结构体公开字段布局和旧函数签名不变。
+
+更多内容：[API 契约/错误码说明](docs/API.md)、[变更日志](CHANGELOG.md)、[贡献规范](CONTRIBUTING.md)。所有导出结构体、成员、宏和公共函数都补充了 Doxygen 注释。参考了 [Zephyr API/Doxygen 规范](https://docs.zephyrproject.org/latest/develop/api/design_guidelines.html) 与 [libuv 错误码设计](https://docs.libuv.org/en/stable/errors.html)，**没有添加对两者的依赖**。
+
+### 4.2 单元测试与平台兼容
+
+新增错误码全覆盖测试、异常参数/NULL/NaN/Inf 测试、数值极端情况、状态回滚验证、确定性 25,000 样本压力测试。保留旧 API 回归测试，并运行一维、二维、三维示例作为冒烟测试。CI 支持 Windows、macOS、Ubuntu，另外在 Linux 上进行 **ASan/UBSan** 检测。可通过 `OEF_ENABLE_SANITIZERS=ON` 配置开启检测（Clang/GCC），通过 `OEF_BUILD_DOCS=ON` 生成 Doxygen 文档（需安装 Doxygen）。
+
 ## 五、编译、测试和集成
 
 ### 使用 CMake（Linux / macOS / Windows）
@@ -245,7 +288,7 @@ cmake --build build --config Debug --parallel
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-CTest 将执行库的单元测试，以及全部三个示例的基本运行测试。
+CTest 将执行两个单元测试套件，以及全部三个示例的基本运行测试。
 
 示例可执行文件为：`oef_example_1d`、`oef_example_2d`、`oef_example_3d`。
 
@@ -288,4 +331,4 @@ target_link_libraries(your_target PRIVATE one_euro_filter::one_euro_filter)
 
 本库的一维部分采用标准一欧元滤波思想；**二维/三维共享向量速度截止频率**以及**可选最大截止频率**属于本库的实现设计。
 
-本项目采用 [MIT License](LICENSE) 开源。
+本项目采用 [MIT License](LICENSE) 开源。**v1.1.0** 保留 v1.0 所有原函数签名并增加带错误码接口。

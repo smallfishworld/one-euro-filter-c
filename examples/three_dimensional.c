@@ -1,44 +1,32 @@
 /* SPDX-License-Identifier: MIT */
-/* Generic 3D example: variable-rate spatial position measurements. */
+/** @file three_dimensional.c @brief 3D variable-sample-time example. */
 #include "one_euro_filter.h"
 #include <stdio.h>
 
+/** @brief Smooth 3D measured positions using actual inter-sample times. */
 int main(void)
 {
-    const oef_vec3_t points[] = {
-        {1.00f, 2.00f, 3.00f}, {1.02f, 1.98f, 3.01f},
-        {0.99f, 2.03f, 2.98f}, {1.20f, 2.10f, 3.08f},
-        {1.55f, 2.30f, 3.25f}, {1.90f, 2.60f, 3.50f}
+    const oef_vec3_t positions[] = {
+        {1.0f, 2.0f, 3.0f}, {1.01f, 1.98f, 3.01f},
+        {1.30f, 2.25f, 3.15f}, {1.70f, 2.50f, 3.40f}
     };
-    /* Actual elapsed time since preceding measurement, in seconds.
-       The first sample is passed through, so its dt only needs to be valid. */
-    const float dt_seconds[] = {
-        0.020f, 0.021f, 0.018f, 0.024f, 0.019f, 0.020f
-    };
-    const size_t count = sizeof(points) / sizeof(points[0]);
+    const float dt_seconds[] = {0.02f, 0.021f, 0.019f, 0.024f};
     oef_config_t config = oef_config_default();
     oef_filter3d_t filter;
-    size_t i;
-
-    config.min_cutoff_hz = 0.8f;
-    config.beta = 0.5f;
-    config.derivative_cutoff_hz = 1.0f;
-    config.max_cutoff_hz = 8.0f; /* optional cutoff ceiling in Hz */
-
-    if (!oef_init3d(&filter, &config)) {
-        fputs("Failed to initialize 3D filter\n", stderr);
-        return 1;
-    }
-
-    puts("index\tfiltered x, y, z");
-    for (i = 0; i < count; ++i) {
-        oef_vec3_t filtered;
-        if (!oef_update3d(&filter, points[i], dt_seconds[i], &filtered)) {
-            fputs("Failed to process 3D point\n", stderr);
+    unsigned int i;
+    config.max_cutoff_hz = 8.0f;
+    if (oef_init3d_ex(&filter, &config) != OEF_OK) return 1;
+    for (i = 0U; i < sizeof(positions) / sizeof(positions[0]); ++i) {
+        oef_vec3_t output;
+        oef_status_t result = oef_update3d_ex(&filter, positions[i],
+                                               dt_seconds[i], &output);
+        if (result != OEF_OK) {
+            fprintf(stderr, "%s: %s\n", oef_status_name(result),
+                    oef_status_message(result));
             return 1;
         }
-        printf("%zu\t(%.3f, %.3f, %.3f)\n", i,
-               filtered.x, filtered.y, filtered.z);
+        printf("3D sample %u: (%.3f, %.3f, %.3f)\n", i,
+               output.x, output.y, output.z);
     }
     return 0;
 }
