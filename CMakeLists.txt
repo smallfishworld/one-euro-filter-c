@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(one_euro_filter VERSION 1.1.0 LANGUAGES C)
+project(one_euro_filter VERSION 2.0.0 LANGUAGES C)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     set(OEF_STANDALONE ON)
@@ -11,13 +11,18 @@ option(OEF_BUILD_EXAMPLES "Build examples" ${OEF_STANDALONE})
 option(OEF_ENABLE_SANITIZERS "Enable AddressSanitizer and UBSan (Clang/GCC)" OFF)
 option(OEF_BUILD_DOCS "Generate Doxygen HTML documentation (requires Doxygen)" OFF)
 
-add_library(one_euro_filter STATIC src/one_euro_filter.c)
+add_library(one_euro_filter STATIC
+    src/one_euro_filter.c
+    src/one_euro_auto.c
+    src/one_euro_clock.c)
 add_library(one_euro_filter::one_euro_filter ALIAS one_euro_filter)
 target_compile_features(one_euro_filter PUBLIC c_std_99)
 target_include_directories(one_euro_filter PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>)
-if(NOT MSVC)
+if(WIN32)
+    target_link_libraries(one_euro_filter PUBLIC kernel32)
+elseif(NOT MSVC)
     target_link_libraries(one_euro_filter PUBLIC m)
 endif()
 
@@ -42,10 +47,13 @@ if(OEF_BUILD_TESTS)
     enable_testing()
     add_executable(oef_tests tests/test_one_euro_filter.c)
     add_executable(oef_error_tests tests/test_error_codes.c)
+    add_executable(oef_auto_tests tests/test_auto_clock.c)
     target_link_libraries(oef_tests PRIVATE one_euro_filter)
     target_link_libraries(oef_error_tests PRIVATE one_euro_filter)
+    target_link_libraries(oef_auto_tests PRIVATE one_euro_filter)
     add_test(NAME one_euro_filter_tests COMMAND oef_tests)
     add_test(NAME one_euro_filter_error_tests COMMAND oef_error_tests)
+    add_test(NAME one_euro_filter_auto_clock_tests COMMAND oef_auto_tests)
     if(OEF_BUILD_EXAMPLES)
         add_test(NAME example_1d COMMAND oef_example_1d)
         add_test(NAME example_2d COMMAND oef_example_2d)

@@ -29,8 +29,6 @@ static void test_config(void)
     c.min_cutoff_hz = NAN;
     assert(!oef_config_valid(&c));
     c = oef_config_default();
-    c.sample_frequency_hz = 0.0f;
-    assert(!oef_config_valid(&c));
 }
 
 /** @brief Regression test helper: test initial and constant. */
@@ -44,7 +42,7 @@ static void test_initial_and_constant(void)
     assert(oef_update(&f, 10.0f, 0.04f, &out));
     assert(out == 10.0f);
     for (i = 0; i < 100; i++) {
-        assert(oef_step(&f, 10.0f, &out));
+        assert(oef_update(&f, 10.0f, 0.04f, &out));
         assert(out == 10.0f);
     }
     assert(!oef_update(&f, 11.0f, 0.0f, &out));
@@ -52,7 +50,7 @@ static void test_initial_and_constant(void)
     assert(out == 10.0f && f.last_raw == 10.0f);
     oef_reset(&f);
     assert(!f.initialized);
-    assert(oef_step(&f, 99.0f, &out));
+    assert(oef_update(&f, 99.0f, 0.04f, &out));
     assert(out == 99.0f);
 }
 
@@ -69,7 +67,7 @@ static void test_smooth_noise(void)
     assert(oef_init(&f, &c));
     for (i = 0; i < 300; i++) {
         float raw = 10.0f + ((i % 2) ? 0.15f : -0.15f);
-        assert(oef_step(&f, raw, &out));
+        assert(oef_update(&f, raw, 0.04f, &out));
         if (i >= 50) {
             input_energy += (raw - 10.0f) * (raw - 10.0f);
             filtered_energy += (out - 10.0f) * (out - 10.0f);
@@ -88,10 +86,10 @@ static void test_speed_response(void)
     assert(oef_init(&slow, &c));
     c.beta = 3.0f;
     assert(oef_init(&fast, &c));
-    assert(oef_step(&slow, 0, &a));
-    assert(oef_step(&fast, 0, &b));
-    assert(oef_step(&slow, 1, &a));
-    assert(oef_step(&fast, 1, &b));
+    assert(oef_update(&slow, 0, 0.04f, &a));
+    assert(oef_update(&fast, 0, 0.04f, &b));
+    assert(oef_update(&slow, 1, 0.04f, &a));
+    assert(oef_update(&fast, 1, 0.04f, &b));
     assert(b > a);
     assert(a > 0 && b < 1);
 }
@@ -103,11 +101,11 @@ static void test_reconfigure(void)
     oef_config_t c = oef_config_default();
     float out;
     assert(oef_init(&f, &c));
-    assert(oef_step(&f, 3, &out));
+    assert(oef_update(&f, 3, 0.04f, &out));
     c.beta = 2;
     assert(oef_set_config(&f, &c));
     assert(f.initialized);
-    assert(oef_step(&f, 3, &out));
+    assert(oef_update(&f, 3, 0.04f, &out));
     assert(out == 3);
     c.min_cutoff_hz = -1;
     assert(!oef_set_config(&f, &c));
@@ -123,10 +121,10 @@ static void test_dt_and_cutoff_cap(void)
     assert(oef_init(&uncapped, &c));
     c.max_cutoff_hz = c.min_cutoff_hz;
     assert(oef_init(&capped, &c));
-    assert(oef_step(&uncapped, 0.0f, &slow_out));
-    assert(oef_step(&capped, 0.0f, &capped_out));
-    assert(oef_step(&uncapped, 2.0f, &slow_out));
-    assert(oef_step(&capped, 2.0f, &capped_out));
+    assert(oef_update(&uncapped, 0.0f, 0.04f, &slow_out));
+    assert(oef_update(&capped, 0.0f, 0.04f, &capped_out));
+    assert(oef_update(&uncapped, 2.0f, 0.04f, &slow_out));
+    assert(oef_update(&capped, 2.0f, 0.04f, &capped_out));
     assert(slow_out > capped_out);
 
     c = oef_config_default();
@@ -148,14 +146,14 @@ static void test_2d_and_invalid(void)
     oef_config_t c = oef_config_default();
     oef_vec2_t out = { -9, -9 }, input = {1, 2};
     assert(oef_init2d(&f, &c));
-    assert(oef_step2d(&f, input, &out));
+    assert(oef_update2d(&f, input, 0.04f, &out));
     assert(near(out.x, 1, 0.0001f) && near(out.y, 2, 0.0001f));
     input = (oef_vec2_t){3, 4};
-    assert(oef_step2d(&f, input, &out));
+    assert(oef_update2d(&f, input, 0.04f, &out));
     /* Equal increments in X and Y use the same alpha. */
     assert(near(out.x - 1, out.y - 2, 0.0001f));
     input.x = INFINITY;
-    assert(!oef_step2d(&f, input, &out));
+    assert(!oef_update2d(&f, input, 0.04f, &out));
     assert(f.last_raw.x == 3 && f.last_raw.y == 4);
     oef_reset2d(&f);
     assert(!f.initialized);
@@ -172,10 +170,10 @@ static void test_3d_and_reconfigure(void)
     oef_vec3_t raw = {1.0f, 2.0f, 3.0f};
     oef_vec3_t out = {-1.0f, -1.0f, -1.0f};
     assert(oef_init3d(&f, &c));
-    assert(oef_step3d(&f, raw, &out));
+    assert(oef_update3d(&f, raw, 0.04f, &out));
     assert(out.x == raw.x && out.y == raw.y && out.z == raw.z);
     raw = (oef_vec3_t){2.0f, 3.0f, 4.0f};
-    assert(oef_step3d(&f, raw, &out));
+    assert(oef_update3d(&f, raw, 0.04f, &out));
     assert(near(out.x - 1.0f, out.y - 2.0f, 1e-5f));
     assert(near(out.x - 1.0f, out.z - 3.0f, 1e-5f));
     assert(out.x > 1.0f && out.x < 2.0f);
@@ -183,7 +181,7 @@ static void test_3d_and_reconfigure(void)
     assert(oef_set_config3d(&f, &c));
     assert(f.initialized && f.config.beta == 2.0f);
     raw.y = NAN;
-    assert(!oef_step3d(&f, raw, &out));
+    assert(!oef_update3d(&f, raw, 0.04f, &out));
     assert(f.last_raw.y == 3.0f);
     assert(!oef_update3d(&f, raw, 0.0f, &out));
     assert(!oef_update3d(&f, raw, 0.02f, NULL));
@@ -197,7 +195,7 @@ static void test_3d_and_reconfigure(void)
     assert(out.z == 9.0f);
 }
 
-/** @brief Run original API backward-compatibility test suite. */
+/** @brief Run the manual-time API regression suite. */
 int main(void)
 {
     test_config();
