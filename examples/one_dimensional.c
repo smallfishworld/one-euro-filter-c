@@ -1,38 +1,26 @@
 /* SPDX-License-Identifier: MIT */
-/* Generic 1D example: smoothing a noisy scalar sensor stream. */
+/** @file one_dimensional.c @brief Scalar sensor reading smoothing example. */
 #include "one_euro_filter.h"
 #include <stdio.h>
 
+/** @brief Initialize a filter and process simulated noisy samples. */
 int main(void)
 {
-    const float readings[] = {
-        25.00f, 25.12f, 24.91f, 25.08f, 24.96f,
-        25.03f, 25.48f, 25.91f, 26.10f, 26.04f
-    };
-    const size_t count = sizeof(readings) / sizeof(readings[0]);
+    const float readings[] = {25.0f, 25.1f, 24.9f, 25.2f, 26.1f, 26.0f};
     oef_config_t config = oef_config_default();
     oef_filter_t filter;
-    size_t i;
-
-    /* The sensor produces one sample every 20 ms (50 Hz). */
+    unsigned int i;
     config.sample_frequency_hz = 50.0f;
-    config.min_cutoff_hz = 0.8f;
-    config.beta = 0.5f;
-    config.derivative_cutoff_hz = 1.0f;
-
-    if (!oef_init(&filter, &config)) {
-        fputs("Failed to initialize 1D filter\n", stderr);
-        return 1;
-    }
-
-    puts("index\tmeasurement\tfiltered");
-    for (i = 0; i < count; ++i) {
-        float filtered;
-        if (!oef_step(&filter, readings[i], &filtered)) {
-            fputs("Failed to process sample\n", stderr);
+    if (oef_init_ex(&filter, &config) != OEF_OK) return 1;
+    for (i = 0U; i < sizeof(readings) / sizeof(readings[0]); ++i) {
+        float output;
+        oef_status_t result = oef_step_ex(&filter, readings[i], &output);
+        if (result != OEF_OK) {
+            fprintf(stderr, "%s: %s\n", oef_status_name(result),
+                    oef_status_message(result));
             return 1;
         }
-        printf("%zu\t%.3f\t\t%.3f\n", i, readings[i], filtered);
+        printf("1D sample %u: input=%.3f output=%.3f\n", i, readings[i], output);
     }
     return 0;
 }

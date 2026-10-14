@@ -27,8 +27,12 @@ $(LIB): $(OBJ)
 $(BUILD_DIR)/oef_tests: tests/test_one_euro_filter.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
-test: $(BUILD_DIR)/oef_tests
+$(BUILD_DIR)/oef_error_tests: tests/test_error_codes.c $(LIB)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
+test: $(BUILD_DIR)/oef_tests $(BUILD_DIR)/oef_error_tests
 	./$(BUILD_DIR)/oef_tests
+	./$(BUILD_DIR)/oef_error_tests
 
 $(BUILD_DIR)/oef_example_1d: examples/one_dimensional.c $(LIB)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $< $(LIB) $(LDFLAGS) $(LDLIBS) -o $@

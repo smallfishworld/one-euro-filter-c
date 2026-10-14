@@ -216,6 +216,50 @@ Runnable source: [examples/three_dimensional.c](examples/three_dimensional.c).
 - Use `reset` after changing coordinate units, switching to an unrelated signal, or intentionally discarding prior tracking history.
 - The filter reduces *temporal* jitter; it does not fix outliers, inconsistent measurement models, or discontinuities in the raw data. It does not mathematically force stationary output to be constant.
 
+
+### 4.1 Stable error codes and stronger API contracts (v1.1.0)
+
+For production integrations, prefer the new **`*_ex`** functions. They return `oef_status_t` (success = `OEF_OK == 0`, failure = a **negative library-specific code**), instead of the former `bool` result. Error codes do **not** represent POSIX `errno`.
+
+| Status | Value | Meaning |
+| --- | ---: | --- |
+| `OEF_OK` | 0 | Success |
+| `OEF_E_NULL` | -1 | Required pointer is NULL |
+| `OEF_E_CONFIG` | -2 | Invalid proposed configuration |
+| `OEF_E_INPUT` | -3 | Input is NaN or infinity |
+| `OEF_E_TIME` | -4 | Invalid or non-positive sample interval |
+| `OEF_E_STATE` | -5 | Uninitialized/corrupt filter state or active configuration |
+| `OEF_E_RANGE` | -6 | Intermediate/output cannot be represented safely as float |
+
+```c
+oef_config_t cfg = oef_config_default();
+oef_filter2d_t filter;
+oef_status_t st = oef_init2d_ex(&filter, &cfg);
+if (st != OEF_OK) {
+    /* Initialization failure: config or pointers should be checked. */
+}
+
+oef_vec2_t point = {100.7f, 199.6f};
+oef_vec2_t smooth;
+st = oef_update2d_ex(&filter, point, 1.0f / 60.0f, &smooth);
+if (st == OEF_OK) {
+    /* Use smooth.x and smooth.y. */
+} else {
+    /* Safe, constant strings; no allocation or global last-error state. */
+    /* Log oef_status_name(st), oef_status_message(st). */
+}
+```
+
+**Failure atomicity:** invalid configuration, NaN/Inf, bad `dt`, corrupted stored values or numeric overflow result in an error **without advancing history or writing output**. Calculation uses `double` intermediates and checks the representability of persisted `float` state. The required contract is to **initialize each instance first** and avoid sharing an instance between threads without synchronization.
+
+**Backward compatibility:** the original `bool` `oef_init*`, `oef_set_config*`, `oef_step*`, `oef_update*` methods are kept and return `true` exactly for `OEF_OK`. Original `void` resets remain and discard the error; `oef_reset*_ex` reports it. Public structs and their field layout are unchanged.
+
+See the [API contract / error-handling reference](docs/API.md), [changelog](CHANGELOG.md), and [contribution guidelines](CONTRIBUTING.md). Public declarations, structures, fields and all functions have Doxygen comments. The documentation conventions are inspired by [Zephyr's C API and Doxygen guidelines](https://docs.zephyrproject.org/latest/develop/api/design_guidelines.html); the status convention is inspired by [libuv's error handling](https://docs.libuv.org/en/stable/errors.html), without depending on either project.
+
+### 4.2 Testing and portability
+
+The project includes backward-compatibility tests, precise-error/rollback checks, invalid pointer/configuration tests, extreme numeric cases, deterministic 25,000-sample stress tests and standalone 1D/2D/3D smoke tests. GitHub Actions builds on Ubuntu, macOS and Windows plus a Linux **AddressSanitizer (ASan)** / **UndefinedBehaviorSanitizer (UBSan)** job. Optional `OEF_ENABLE_SANITIZERS=ON` enables instrumented CMake builds with Clang/GCC; `OEF_BUILD_DOCS=ON` generates Doxygen documentation where Doxygen is available.
+
 ## 5. Build and run
 
 ### CMake (Linux / macOS / Windows)
@@ -226,7 +270,7 @@ cmake --build build --config Debug --parallel
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-CTest runs the library unit tests **and** smoke-tests all three independent examples.
+CTest runs both unit-test suites **and** smoke-tests all three independent examples.
 
 Executable names: `oef_example_1d`, `oef_example_2d`, `oef_example_3d`.
 
@@ -269,4 +313,4 @@ The algorithm was introduced by Casiez, Roussel and Vogel in *1€ Filter: A Sim
 
 The scalar formulation follows the standard One Euro Filter idea. The **shared vector-speed cutoff for 2D/3D** and optional **maximum cutoff** are implementation choices of this library.
 
-Released under the [MIT License](LICENSE).
+Released under the [MIT License](LICENSE). Version **1.1.0** extends the original v1.0 API without breaking the existing call signatures.

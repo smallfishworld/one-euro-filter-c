@@ -1,237 +1,516 @@
 /* SPDX-License-Identifier: MIT */
+/** @file one_euro_filter.c @brief Shared numerical core and dimension wrappers. */
 #include "one_euro_filter.h"
+
+#include <float.h>
 #include <math.h>
 #include <string.h>
 
-#define OEF_TWO_PI 6.2831853071795864769f
+/** @brief Mathematical constant used when mapping cutoff to low-pass alpha. */
+#define OEF_TWO_PI 6.283185307179586476925286766559
+/** @brief Maximum supported number of coordinates; no dynamic allocation. */
+#define OEF_MAX_DIM 3U
 
-static bool valid2(oef_vec2_t v)
+/** @brief Check that a candidate sample contains only finite coordinates. */
+static bool oef_finite_array(const float *a, unsigned int dimensions)
 {
-    return isfinite(v.x) && isfinite(v.y);
-}
-
-static bool valid3(oef_vec3_t v)
-{
-    return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
-}
-
-static float alpha_for(float cutoff, float dt)
-{
-    /* Algebraically equivalent to dt/(dt + 1/(2*pi*cutoff)). */
-    float z = OEF_TWO_PI * cutoff * dt;
-    return z / (1.0f + z);
-}
-
-static float cutoff_for(const oef_config_t *c, float speed)
-{
-    float cutoff = c->min_cutoff_hz + c->beta * speed;
-    if (c->max_cutoff_hz > 0.0f && cutoff > c->max_cutoff_hz) {
-        cutoff = c->max_cutoff_hz;
+    unsigned int i;
+    for (i = 0U; i < dimensions; ++i) {
+        if (!isfinite(a[i])) {
+            return false;
+        }
     }
-    return cutoff;
+    return true;
 }
 
+/**
+ * @brief Calculate low-pass coefficient in double precision.
+ * @details dt and cutoff are strictly positive. The double intermediate
+ * prevents spurious float overflow when an otherwise-valid value is large.
+ */
+static double oef_alpha(double cutoff_hz, double dt_seconds)
+{
+    double factor = OEF_TWO_PI * cutoff_hz * dt_seconds;
+    return factor / (1.0 + factor);
+}
+
+/** @brief Validate configuration separately from a filter's current state. */
+static oef_status_t oef_check_config(const oef_config_t *config)
+{
+    if (config == NULL) {
+        return OEF_E_NULL;
+    }
+    if (!isfinite(config->min_cutoff_hz) ||
+        config->min_cutoff_hz <= 0.0f ||
+        !isfinite(config->beta) || config->beta < 0.0f ||
+        !isfinite(config->derivative_cutoff_hz) ||
+        config->derivative_cutoff_hz <= 0.0f ||
+        !isfinite(config->sample_frequency_hz) ||
+        config->sample_frequency_hz <= 0.0f ||
+        !isfinite(config->max_cutoff_hz) ||
+        config->max_cutoff_hz < 0.0f ||
+        (config->max_cutoff_hz > 0.0f &&
+         config->max_cutoff_hz < config->min_cutoff_hz)) {
+        return OEF_E_CONFIG;
+    }
+    return OEF_OK;
+}
+
+/**
+ * @brief Convert fixed sample frequency into a valid float dt.
+ * @details Rejects extreme reciprocals that would not fit the update API.
+ */
+static oef_status_t oef_frequency_dt(const oef_config_t *config, float *dt)
+{
+    double delta;
+    if (oef_check_config(config) != OEF_OK) {
+        return OEF_E_STATE;
+    }
+    delta = 1.0 / (double)config->sample_frequency_hz;
+    if (!isfinite(delta) || delta > (double)FLT_MAX || delta <= 0.0) {
+        return OEF_E_RANGE;
+    }
+    *dt = (float)delta;
+    if (!isfinite(*dt) || *dt <= 0.0f) {
+        return OEF_E_RANGE;
+    }
+    return OEF_OK;
+}
+
+/**
+ * @brief Validate retained history and live configuration.
+ * @details A false initialized flag is normal before the first successful
+ * sample; history is then ignored. This method cannot make using a truly
+ * uninitialized C object safe: calling init first is a required contract.
+ */
+static bool oef_history_valid(const oef_config_t *config, bool initialized,
+                              const float *raw, const float *filtered,
+                              const float *velocity, unsigned int dimensions)
+{
+    if (oef_check_config(config) != OEF_OK) {
+        return false;
+    }
+    return !initialized ||
+           (oef_finite_array(raw, dimensions) &&
+            oef_finite_array(filtered, dimensions) &&
+            oef_finite_array(velocity, dimensions));
+}
+
+/**
+ * @brief Pure state transition for 1..3 coordinates.
+ * @details Verifies all calculations before the caller commits new history.
+ * A shared cutoff from the Euclidean velocity norm preserves consistent
+ * smoothing strength across vector axes.
+ */
+static oef_status_t oef_compute(const oef_config_t *config,
+                                bool initialized,
+                                unsigned int dimensions,
+                                const float *input,
+                                const float *previous_raw,
+                                const float *previous_filtered,
+                                const float *previous_velocity,
+                                float dt_seconds,
+                                float *next_filtered,
+                                float *next_velocity)
+{
+    double velocity[OEF_MAX_DIM];
+    double derivative_alpha, speed = 0.0;
+    double cutoff, alpha;
+    unsigned int i;
+
+    if (!oef_finite_array(input, dimensions)) {
+        return OEF_E_INPUT;
+    }
+    if (!isfinite(dt_seconds) || dt_seconds <= 0.0f) {
+        return OEF_E_TIME;
+    }
+    if (!oef_history_valid(config, initialized, previous_raw,
+                           previous_filtered, previous_velocity, dimensions)) {
+        return OEF_E_STATE;
+    }
+    if (!initialized) {
+        for (i = 0U; i < dimensions; ++i) {
+            next_filtered[i] = input[i];
+            next_velocity[i] = 0.0f;
+        }
+        return OEF_OK;
+    }
+
+    derivative_alpha = oef_alpha((double)config->derivative_cutoff_hz,
+                                 (double)dt_seconds);
+    if (!isfinite(derivative_alpha)) {
+        return OEF_E_RANGE;
+    }
+
+    for (i = 0U; i < dimensions; ++i) {
+        /* Cast before subtraction: FLT_MAX - (-FLT_MAX) would overflow in float. */
+        double raw_speed = ((double)input[i] - (double)previous_raw[i]) /
+                           (double)dt_seconds;
+        velocity[i] = (double)previous_velocity[i] + derivative_alpha *
+                       (raw_speed - (double)previous_velocity[i]);
+        if (!isfinite(velocity[i]) || fabs(velocity[i]) > (double)FLT_MAX) {
+            return OEF_E_RANGE;
+        }
+        speed = hypot(speed, velocity[i]);
+    }
+    cutoff = (double)config->min_cutoff_hz +
+             (double)config->beta * speed;
+    if (config->max_cutoff_hz > 0.0f &&
+        cutoff > (double)config->max_cutoff_hz) {
+        cutoff = (double)config->max_cutoff_hz;
+    }
+    alpha = oef_alpha(cutoff, (double)dt_seconds);
+    if (!isfinite(speed) || !isfinite(cutoff) ||
+        !isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+        return OEF_E_RANGE;
+    }
+
+    for (i = 0U; i < dimensions; ++i) {
+        double value = (double)previous_filtered[i] +
+                       alpha * ((double)input[i] - (double)previous_filtered[i]);
+        if (!isfinite(value) || fabs(value) > (double)FLT_MAX) {
+            return OEF_E_RANGE;
+        }
+        next_filtered[i] = (float)value;
+        next_velocity[i] = (float)velocity[i];
+        if (!isfinite(next_filtered[i]) || !isfinite(next_velocity[i])) {
+            return OEF_E_RANGE;
+        }
+    }
+    return OEF_OK;
+}
+
+/** @brief Default configuration: conservative, tunable starting values. */
 oef_config_t oef_config_default(void)
 {
-    oef_config_t cfg = {0.8f, 0.5f, 1.0f, 25.0f, 0.0f};
-    return cfg;
+    const oef_config_t config = {0.8f, 0.5f, 1.0f, 25.0f, 0.0f};
+    return config;
 }
 
-bool oef_config_valid(const oef_config_t *c)
+/** @brief Public bool validator for parameter ranges. */
+bool oef_config_valid(const oef_config_t *config)
 {
-    return c != NULL &&
-           isfinite(c->min_cutoff_hz) && c->min_cutoff_hz > 0.0f &&
-           isfinite(c->beta) && c->beta >= 0.0f &&
-           isfinite(c->derivative_cutoff_hz) &&
-           c->derivative_cutoff_hz > 0.0f &&
-           isfinite(c->sample_frequency_hz) &&
-           c->sample_frequency_hz > 0.0f &&
-           isfinite(c->max_cutoff_hz) &&
-           (c->max_cutoff_hz == 0.0f ||
-            c->max_cutoff_hz >= c->min_cutoff_hz);
+    return oef_check_config(config) == OEF_OK;
 }
 
+/** @brief Decode numeric error to a stable symbolic label. */
+const char *oef_status_name(oef_status_t status)
+{
+    switch (status) {
+    case OEF_OK: return "OEF_OK";
+    case OEF_E_NULL: return "OEF_E_NULL";
+    case OEF_E_CONFIG: return "OEF_E_CONFIG";
+    case OEF_E_INPUT: return "OEF_E_INPUT";
+    case OEF_E_TIME: return "OEF_E_TIME";
+    case OEF_E_STATE: return "OEF_E_STATE";
+    case OEF_E_RANGE: return "OEF_E_RANGE";
+    default: return "OEF_UNKNOWN";
+    }
+}
+
+/** @brief Decode numeric error to a static English diagnostic message. */
+const char *oef_status_message(oef_status_t status)
+{
+    switch (status) {
+    case OEF_OK: return "success";
+    case OEF_E_NULL: return "required pointer is null";
+    case OEF_E_CONFIG: return "invalid configuration parameter";
+    case OEF_E_INPUT: return "input contains a non-finite value";
+    case OEF_E_TIME: return "sample interval must be finite and positive";
+    case OEF_E_STATE: return "filter state or active configuration is invalid";
+    case OEF_E_RANGE: return "numeric result cannot be represented";
+    default: return "unknown status code";
+    }
+}
+
+/** @brief Transactional scalar initialization; validates before writing. */
+oef_status_t oef_init_ex(oef_filter_t *filter, const oef_config_t *config)
+{
+    oef_status_t status;
+    if (filter == NULL || config == NULL) {
+        return OEF_E_NULL;
+    }
+    status = oef_check_config(config);
+    if (status != OEF_OK) {
+        return status;
+    }
+    /* Copy before clearing in case config aliases filter->config. */
+    {
+        oef_config_t copy = *config;
+        memset(filter, 0, sizeof(*filter));
+        filter->config = copy;
+    }
+    return OEF_OK;
+}
+
+/** @brief Transactional 2D initialization; validates before writing. */
+oef_status_t oef_init2d_ex(oef_filter2d_t *filter, const oef_config_t *config)
+{
+    oef_status_t status;
+    if (filter == NULL || config == NULL) return OEF_E_NULL;
+    status = oef_check_config(config);
+    if (status != OEF_OK) return status;
+    {
+        oef_config_t copy = *config;
+        memset(filter, 0, sizeof(*filter));
+        filter->config = copy;
+    }
+    return OEF_OK;
+}
+
+/** @brief Transactional 3D initialization; validates before writing. */
+oef_status_t oef_init3d_ex(oef_filter3d_t *filter, const oef_config_t *config)
+{
+    oef_status_t status;
+    if (filter == NULL || config == NULL) return OEF_E_NULL;
+    status = oef_check_config(config);
+    if (status != OEF_OK) return status;
+    {
+        oef_config_t copy = *config;
+        memset(filter, 0, sizeof(*filter));
+        filter->config = copy;
+    }
+    return OEF_OK;
+}
+
+/** @brief Change scalar tuning while preserving validated stored samples. */
+oef_status_t oef_set_config_ex(oef_filter_t *filter, const oef_config_t *config)
+{
+    if (filter == NULL || config == NULL) return OEF_E_NULL;
+    if (oef_check_config(config) != OEF_OK) return OEF_E_CONFIG;
+    if (!oef_history_valid(&filter->config, filter->initialized,
+                           &filter->last_raw, &filter->last_filtered,
+                           &filter->last_velocity, 1U)) return OEF_E_STATE;
+    filter->config = *config;
+    return OEF_OK;
+}
+
+/** @brief Change 2D tuning while preserving validated stored samples. */
+oef_status_t oef_set_config2d_ex(oef_filter2d_t *filter, const oef_config_t *config)
+{
+    if (filter == NULL || config == NULL) return OEF_E_NULL;
+    if (oef_check_config(config) != OEF_OK) return OEF_E_CONFIG;
+    {
+        const float raw[2] = {filter->last_raw.x, filter->last_raw.y};
+        const float out[2] = {filter->last_filtered.x, filter->last_filtered.y};
+        const float vel[2] = {filter->last_velocity.x, filter->last_velocity.y};
+        if (!oef_history_valid(&filter->config, filter->initialized,
+                               raw, out, vel, 2U)) return OEF_E_STATE;
+    }
+    filter->config = *config;
+    return OEF_OK;
+}
+
+/** @brief Change 3D tuning while preserving validated stored samples. */
+oef_status_t oef_set_config3d_ex(oef_filter3d_t *filter, const oef_config_t *config)
+{
+    if (filter == NULL || config == NULL) return OEF_E_NULL;
+    if (oef_check_config(config) != OEF_OK) return OEF_E_CONFIG;
+    {
+        const float raw[3] = {filter->last_raw.x, filter->last_raw.y,
+                              filter->last_raw.z};
+        const float out[3] = {filter->last_filtered.x, filter->last_filtered.y,
+                              filter->last_filtered.z};
+        const float vel[3] = {filter->last_velocity.x, filter->last_velocity.y,
+                              filter->last_velocity.z};
+        if (!oef_history_valid(&filter->config, filter->initialized,
+                               raw, out, vel, 3U)) return OEF_E_STATE;
+    }
+    filter->config = *config;
+    return OEF_OK;
+}
+
+/** @brief Reset only the scalar history after validating configuration. */
+oef_status_t oef_reset_ex(oef_filter_t *filter)
+{
+    if (filter == NULL) return OEF_E_NULL;
+    if (oef_check_config(&filter->config) != OEF_OK) return OEF_E_STATE;
+    filter->last_raw = 0.0f;
+    filter->last_filtered = 0.0f;
+    filter->last_velocity = 0.0f;
+    filter->initialized = false;
+    return OEF_OK;
+}
+
+/** @brief Reset only the 2D history after validating configuration. */
+oef_status_t oef_reset2d_ex(oef_filter2d_t *filter)
+{
+    if (filter == NULL) return OEF_E_NULL;
+    if (oef_check_config(&filter->config) != OEF_OK) return OEF_E_STATE;
+    filter->last_raw = (oef_vec2_t){0.0f, 0.0f};
+    filter->last_filtered = (oef_vec2_t){0.0f, 0.0f};
+    filter->last_velocity = (oef_vec2_t){0.0f, 0.0f};
+    filter->initialized = false;
+    return OEF_OK;
+}
+
+/** @brief Reset only the 3D history after validating configuration. */
+oef_status_t oef_reset3d_ex(oef_filter3d_t *filter)
+{
+    if (filter == NULL) return OEF_E_NULL;
+    if (oef_check_config(&filter->config) != OEF_OK) return OEF_E_STATE;
+    filter->last_raw = (oef_vec3_t){0.0f, 0.0f, 0.0f};
+    filter->last_filtered = (oef_vec3_t){0.0f, 0.0f, 0.0f};
+    filter->last_velocity = (oef_vec3_t){0.0f, 0.0f, 0.0f};
+    filter->initialized = false;
+    return OEF_OK;
+}
+
+/** @brief Scalar update; commit only after shared engine succeeds. */
+oef_status_t oef_update_ex(oef_filter_t *filter, float input,
+                           float dt_seconds, float *output)
+{
+    float next[OEF_MAX_DIM], velocity[OEF_MAX_DIM];
+    oef_status_t status;
+    if (filter == NULL || output == NULL) return OEF_E_NULL;
+    status = oef_compute(&filter->config, filter->initialized, 1U,
+                         &input, &filter->last_raw, &filter->last_filtered,
+                         &filter->last_velocity, dt_seconds, next, velocity);
+    if (status != OEF_OK) return status;
+    filter->last_raw = input;
+    filter->last_filtered = next[0];
+    filter->last_velocity = velocity[0];
+    filter->initialized = true;
+    *output = next[0];
+    return OEF_OK;
+}
+
+/** @brief 2D update; one shared alpha computed by vector speed. */
+oef_status_t oef_update2d_ex(oef_filter2d_t *filter, oef_vec2_t input,
+                             float dt_seconds, oef_vec2_t *output)
+{
+    float next[OEF_MAX_DIM], velocity[OEF_MAX_DIM];
+    oef_status_t status;
+    if (filter == NULL || output == NULL) return OEF_E_NULL;
+    {
+        const float in[2] = {input.x, input.y};
+        const float old_raw[2] = {filter->last_raw.x, filter->last_raw.y};
+        const float old_out[2] = {filter->last_filtered.x, filter->last_filtered.y};
+        const float old_vel[2] = {filter->last_velocity.x, filter->last_velocity.y};
+        status = oef_compute(&filter->config, filter->initialized, 2U,
+                             in, old_raw, old_out, old_vel,
+                             dt_seconds, next, velocity);
+    }
+    if (status != OEF_OK) return status;
+    filter->last_raw = input;
+    filter->last_filtered.x = next[0];
+    filter->last_filtered.y = next[1];
+    filter->last_velocity.x = velocity[0];
+    filter->last_velocity.y = velocity[1];
+    filter->initialized = true;
+    output->x = next[0];
+    output->y = next[1];
+    return OEF_OK;
+}
+
+/** @brief 3D update; one shared alpha computed by vector speed. */
+oef_status_t oef_update3d_ex(oef_filter3d_t *filter, oef_vec3_t input,
+                             float dt_seconds, oef_vec3_t *output)
+{
+    float next[OEF_MAX_DIM], velocity[OEF_MAX_DIM];
+    oef_status_t status;
+    if (filter == NULL || output == NULL) return OEF_E_NULL;
+    {
+        const float in[3] = {input.x, input.y, input.z};
+        const float old_raw[3] = {filter->last_raw.x, filter->last_raw.y,
+                                  filter->last_raw.z};
+        const float old_out[3] = {filter->last_filtered.x, filter->last_filtered.y,
+                                  filter->last_filtered.z};
+        const float old_vel[3] = {filter->last_velocity.x, filter->last_velocity.y,
+                                  filter->last_velocity.z};
+        status = oef_compute(&filter->config, filter->initialized, 3U,
+                             in, old_raw, old_out, old_vel,
+                             dt_seconds, next, velocity);
+    }
+    if (status != OEF_OK) return status;
+    filter->last_raw = input;
+    filter->last_filtered.x = next[0];
+    filter->last_filtered.y = next[1];
+    filter->last_filtered.z = next[2];
+    filter->last_velocity.x = velocity[0];
+    filter->last_velocity.y = velocity[1];
+    filter->last_velocity.z = velocity[2];
+    filter->initialized = true;
+    output->x = next[0];
+    output->y = next[1];
+    output->z = next[2];
+    return OEF_OK;
+}
+
+/** @brief Scalar fixed-rate update, using checked reciprocal sample rate. */
+oef_status_t oef_step_ex(oef_filter_t *filter, float input, float *output)
+{
+    float dt;
+    oef_status_t status;
+    if (filter == NULL || output == NULL) return OEF_E_NULL;
+    status = oef_frequency_dt(&filter->config, &dt);
+    return status == OEF_OK ? oef_update_ex(filter, input, dt, output) : status;
+}
+
+/** @brief 2D fixed-rate update, using checked reciprocal sample rate. */
+oef_status_t oef_step2d_ex(oef_filter2d_t *filter, oef_vec2_t input,
+                           oef_vec2_t *output)
+{
+    float dt;
+    oef_status_t status;
+    if (filter == NULL || output == NULL) return OEF_E_NULL;
+    status = oef_frequency_dt(&filter->config, &dt);
+    return status == OEF_OK ? oef_update2d_ex(filter, input, dt, output) : status;
+}
+
+/** @brief 3D fixed-rate update, using checked reciprocal sample rate. */
+oef_status_t oef_step3d_ex(oef_filter3d_t *filter, oef_vec3_t input,
+                           oef_vec3_t *output)
+{
+    float dt;
+    oef_status_t status;
+    if (filter == NULL || output == NULL) return OEF_E_NULL;
+    status = oef_frequency_dt(&filter->config, &dt);
+    return status == OEF_OK ? oef_update3d_ex(filter, input, dt, output) : status;
+}
+
+/** @brief Compatibility wrappers: old bool API remains source-compatible. */
 bool oef_init(oef_filter_t *f, const oef_config_t *c)
-{
-    if (!f || !oef_config_valid(c)) return false;
-    memset(f, 0, sizeof(*f));
-    f->config = *c;
-    return true;
-}
+{ return oef_init_ex(f, c) == OEF_OK; }
+/** @brief Compatibility wrapper for 2D initialization. */
 bool oef_init2d(oef_filter2d_t *f, const oef_config_t *c)
-{
-    if (!f || !oef_config_valid(c)) return false;
-    memset(f, 0, sizeof(*f));
-    f->config = *c;
-    return true;
-}
+{ return oef_init2d_ex(f, c) == OEF_OK; }
+/** @brief Compatibility wrapper for 3D initialization. */
 bool oef_init3d(oef_filter3d_t *f, const oef_config_t *c)
-{
-    if (!f || !oef_config_valid(c)) return false;
-    memset(f, 0, sizeof(*f));
-    f->config = *c;
-    return true;
-}
-
+{ return oef_init3d_ex(f, c) == OEF_OK; }
+/** @brief Compatibility wrapper for scalar reconfiguration. */
 bool oef_set_config(oef_filter_t *f, const oef_config_t *c)
-{
-    if (!f || !oef_config_valid(c)) return false;
-    f->config = *c;
-    return true;
-}
+{ return oef_set_config_ex(f, c) == OEF_OK; }
+/** @brief Compatibility wrapper for 2D reconfiguration. */
 bool oef_set_config2d(oef_filter2d_t *f, const oef_config_t *c)
-{
-    if (!f || !oef_config_valid(c)) return false;
-    f->config = *c;
-    return true;
-}
+{ return oef_set_config2d_ex(f, c) == OEF_OK; }
+/** @brief Compatibility wrapper for 3D reconfiguration. */
 bool oef_set_config3d(oef_filter3d_t *f, const oef_config_t *c)
-{
-    if (!f || !oef_config_valid(c)) return false;
-    f->config = *c;
-    return true;
-}
-
+{ return oef_set_config3d_ex(f, c) == OEF_OK; }
+/** @brief Compatibility wrapper for scalar reset; ignores status. */
 void oef_reset(oef_filter_t *f)
-{
-    if (!f) return;
-    f->last_raw = f->last_filtered = f->last_velocity = 0.0f;
-    f->initialized = false;
-}
+{ (void)oef_reset_ex(f); }
+/** @brief Compatibility wrapper for 2D reset; ignores status. */
 void oef_reset2d(oef_filter2d_t *f)
-{
-    if (!f) return;
-    f->last_raw = (oef_vec2_t){0};
-    f->last_filtered = (oef_vec2_t){0};
-    f->last_velocity = (oef_vec2_t){0};
-    f->initialized = false;
-}
+{ (void)oef_reset2d_ex(f); }
+/** @brief Compatibility wrapper for 3D reset; ignores status. */
 void oef_reset3d(oef_filter3d_t *f)
-{
-    if (!f) return;
-    f->last_raw = (oef_vec3_t){0};
-    f->last_filtered = (oef_vec3_t){0};
-    f->last_velocity = (oef_vec3_t){0};
-    f->initialized = false;
-}
-
-bool oef_update(oef_filter_t *f, float x, float dt, float *output)
-{
-    float v, vd, a_d, fc, a, y;
-    if (!f || !output || !oef_config_valid(&f->config) ||
-        !isfinite(x) || !isfinite(dt) || dt <= 0.0f)
-        return false;
-    if (!f->initialized) {
-        f->last_raw = f->last_filtered = x;
-        f->last_velocity = 0.0f;
-        f->initialized = true;
-        *output = x;
-        return true;
-    }
-    v = (x - f->last_raw) / dt;
-    a_d = alpha_for(f->config.derivative_cutoff_hz, dt);
-    if (!isfinite(v) || !isfinite(a_d)) return false;
-    vd = f->last_velocity + a_d * (v - f->last_velocity);
-    fc = cutoff_for(&f->config, fabsf(vd));
-    a = alpha_for(fc, dt);
-    if (!isfinite(vd) || !isfinite(fc) || !isfinite(a)) return false;
-    y = f->last_filtered + a * (x - f->last_filtered);
-    if (!isfinite(y)) return false;
-    f->last_raw = x;
-    f->last_velocity = vd;
-    f->last_filtered = y;
-    *output = y;
-    return true;
-}
-
-bool oef_update2d(oef_filter2d_t *f, oef_vec2_t x, float dt,
-                  oef_vec2_t *output)
-{
-    oef_vec2_t v, vd, y;
-    float a_d, speed, fc, a;
-    if (!f || !output || !oef_config_valid(&f->config) ||
-        !valid2(x) || !isfinite(dt) || dt <= 0.0f)
-        return false;
-    if (!f->initialized) {
-        f->last_raw = f->last_filtered = x;
-        f->last_velocity = (oef_vec2_t){0};
-        f->initialized = true;
-        *output = x;
-        return true;
-    }
-    v.x = (x.x - f->last_raw.x) / dt;
-    v.y = (x.y - f->last_raw.y) / dt;
-    a_d = alpha_for(f->config.derivative_cutoff_hz, dt);
-    if (!valid2(v) || !isfinite(a_d)) return false;
-    vd.x = f->last_velocity.x + a_d * (v.x - f->last_velocity.x);
-    vd.y = f->last_velocity.y + a_d * (v.y - f->last_velocity.y);
-    speed = hypotf(vd.x, vd.y);
-    fc = cutoff_for(&f->config, speed);
-    a = alpha_for(fc, dt);
-    if (!valid2(vd) || !isfinite(speed) || !isfinite(fc) || !isfinite(a))
-        return false;
-    /* One alpha for both axes reduces directional distortion. */
-    y.x = f->last_filtered.x + a * (x.x - f->last_filtered.x);
-    y.y = f->last_filtered.y + a * (x.y - f->last_filtered.y);
-    if (!valid2(y)) return false;
-    f->last_raw = x;
-    f->last_velocity = vd;
-    f->last_filtered = y;
-    *output = y;
-    return true;
-}
-
-bool oef_update3d(oef_filter3d_t *f, oef_vec3_t x, float dt,
-                  oef_vec3_t *output)
-{
-    oef_vec3_t v, vd, y;
-    float a_d, speed, fc, a;
-    if (!f || !output || !oef_config_valid(&f->config) ||
-        !valid3(x) || !isfinite(dt) || dt <= 0.0f)
-        return false;
-    if (!f->initialized) {
-        f->last_raw = f->last_filtered = x;
-        f->last_velocity = (oef_vec3_t){0};
-        f->initialized = true;
-        *output = x;
-        return true;
-    }
-    v.x = (x.x - f->last_raw.x) / dt;
-    v.y = (x.y - f->last_raw.y) / dt;
-    v.z = (x.z - f->last_raw.z) / dt;
-    a_d = alpha_for(f->config.derivative_cutoff_hz, dt);
-    if (!valid3(v) || !isfinite(a_d)) return false;
-    vd.x = f->last_velocity.x + a_d * (v.x - f->last_velocity.x);
-    vd.y = f->last_velocity.y + a_d * (v.y - f->last_velocity.y);
-    vd.z = f->last_velocity.z + a_d * (v.z - f->last_velocity.z);
-    speed = hypotf(hypotf(vd.x, vd.y), vd.z);
-    fc = cutoff_for(&f->config, speed);
-    a = alpha_for(fc, dt);
-    if (!valid3(vd) || !isfinite(speed) || !isfinite(fc) || !isfinite(a))
-        return false;
-    y.x = f->last_filtered.x + a * (x.x - f->last_filtered.x);
-    y.y = f->last_filtered.y + a * (x.y - f->last_filtered.y);
-    y.z = f->last_filtered.z + a * (x.z - f->last_filtered.z);
-    if (!valid3(y)) return false;
-    f->last_raw = x;
-    f->last_velocity = vd;
-    f->last_filtered = y;
-    *output = y;
-    return true;
-}
-
+{ (void)oef_reset3d_ex(f); }
+/** @brief Compatibility wrapper for scalar variable-rate update. */
+bool oef_update(oef_filter_t *f, float x, float dt, float *out)
+{ return oef_update_ex(f, x, dt, out) == OEF_OK; }
+/** @brief Compatibility wrapper for 2D variable-rate update. */
+bool oef_update2d(oef_filter2d_t *f, oef_vec2_t x, float dt, oef_vec2_t *out)
+{ return oef_update2d_ex(f, x, dt, out) == OEF_OK; }
+/** @brief Compatibility wrapper for 3D variable-rate update. */
+bool oef_update3d(oef_filter3d_t *f, oef_vec3_t x, float dt, oef_vec3_t *out)
+{ return oef_update3d_ex(f, x, dt, out) == OEF_OK; }
+/** @brief Compatibility wrapper for scalar fixed-rate update. */
 bool oef_step(oef_filter_t *f, float x, float *out)
-{
-    if (!f || !oef_config_valid(&f->config)) return false;
-    return oef_update(f, x, 1.0f / f->config.sample_frequency_hz, out);
-}
+{ return oef_step_ex(f, x, out) == OEF_OK; }
+/** @brief Compatibility wrapper for 2D fixed-rate update. */
 bool oef_step2d(oef_filter2d_t *f, oef_vec2_t x, oef_vec2_t *out)
-{
-    if (!f || !oef_config_valid(&f->config)) return false;
-    return oef_update2d(f, x, 1.0f / f->config.sample_frequency_hz, out);
-}
+{ return oef_step2d_ex(f, x, out) == OEF_OK; }
+/** @brief Compatibility wrapper for 3D fixed-rate update. */
 bool oef_step3d(oef_filter3d_t *f, oef_vec3_t x, oef_vec3_t *out)
-{
-    if (!f || !oef_config_valid(&f->config)) return false;
-    return oef_update3d(f, x, 1.0f / f->config.sample_frequency_hz, out);
-}
+{ return oef_step3d_ex(f, x, out) == OEF_OK; }
