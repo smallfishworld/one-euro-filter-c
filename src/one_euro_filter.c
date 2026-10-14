@@ -45,34 +45,11 @@ static oef_status_t oef_check_config(const oef_config_t *config)
         !isfinite(config->beta) || config->beta < 0.0f ||
         !isfinite(config->derivative_cutoff_hz) ||
         config->derivative_cutoff_hz <= 0.0f ||
-        !isfinite(config->sample_frequency_hz) ||
-        config->sample_frequency_hz <= 0.0f ||
         !isfinite(config->max_cutoff_hz) ||
         config->max_cutoff_hz < 0.0f ||
         (config->max_cutoff_hz > 0.0f &&
          config->max_cutoff_hz < config->min_cutoff_hz)) {
         return OEF_E_CONFIG;
-    }
-    return OEF_OK;
-}
-
-/**
- * @brief Convert fixed sample frequency into a valid float dt.
- * @details Rejects extreme reciprocals that would not fit the update API.
- */
-static oef_status_t oef_frequency_dt(const oef_config_t *config, float *dt)
-{
-    double delta;
-    if (oef_check_config(config) != OEF_OK) {
-        return OEF_E_STATE;
-    }
-    delta = 1.0 / (double)config->sample_frequency_hz;
-    if (!isfinite(delta) || delta > (double)FLT_MAX || delta <= 0.0) {
-        return OEF_E_RANGE;
-    }
-    *dt = (float)delta;
-    if (!isfinite(*dt) || *dt <= 0.0f) {
-        return OEF_E_RANGE;
     }
     return OEF_OK;
 }
@@ -183,7 +160,7 @@ static oef_status_t oef_compute(const oef_config_t *config,
 /** @brief Default configuration: conservative, tunable starting values. */
 oef_config_t oef_config_default(void)
 {
-    const oef_config_t config = {0.8f, 0.5f, 1.0f, 25.0f, 0.0f};
+    const oef_config_t config = {0.8f, 0.5f, 1.0f, 0.0f};
     return config;
 }
 
@@ -204,6 +181,7 @@ const char *oef_status_name(oef_status_t status)
     case OEF_E_TIME: return "OEF_E_TIME";
     case OEF_E_STATE: return "OEF_E_STATE";
     case OEF_E_RANGE: return "OEF_E_RANGE";
+    case OEF_E_CLOCK: return "OEF_E_CLOCK";
     default: return "OEF_UNKNOWN";
     }
 }
@@ -219,6 +197,7 @@ const char *oef_status_message(oef_status_t status)
     case OEF_E_TIME: return "sample interval must be finite and positive";
     case OEF_E_STATE: return "filter state or active configuration is invalid";
     case OEF_E_RANGE: return "numeric result cannot be represented";
+    case OEF_E_CLOCK: return "monotonic clock failed or returned an invalid timestamp";
     default: return "unknown status code";
     }
 }
@@ -437,39 +416,7 @@ oef_status_t oef_update3d_ex(oef_filter3d_t *filter, oef_vec3_t input,
     return OEF_OK;
 }
 
-/** @brief Scalar fixed-rate update, using checked reciprocal sample rate. */
-oef_status_t oef_step_ex(oef_filter_t *filter, float input, float *output)
-{
-    float dt;
-    oef_status_t status;
-    if (filter == NULL || output == NULL) return OEF_E_NULL;
-    status = oef_frequency_dt(&filter->config, &dt);
-    return status == OEF_OK ? oef_update_ex(filter, input, dt, output) : status;
-}
-
-/** @brief 2D fixed-rate update, using checked reciprocal sample rate. */
-oef_status_t oef_step2d_ex(oef_filter2d_t *filter, oef_vec2_t input,
-                           oef_vec2_t *output)
-{
-    float dt;
-    oef_status_t status;
-    if (filter == NULL || output == NULL) return OEF_E_NULL;
-    status = oef_frequency_dt(&filter->config, &dt);
-    return status == OEF_OK ? oef_update2d_ex(filter, input, dt, output) : status;
-}
-
-/** @brief 3D fixed-rate update, using checked reciprocal sample rate. */
-oef_status_t oef_step3d_ex(oef_filter3d_t *filter, oef_vec3_t input,
-                           oef_vec3_t *output)
-{
-    float dt;
-    oef_status_t status;
-    if (filter == NULL || output == NULL) return OEF_E_NULL;
-    status = oef_frequency_dt(&filter->config, &dt);
-    return status == OEF_OK ? oef_update3d_ex(filter, input, dt, output) : status;
-}
-
-/** @brief Compatibility wrappers: old bool API remains source-compatible. */
+/** @brief Boolean convenience wrappers for manual-dt API. */
 bool oef_init(oef_filter_t *f, const oef_config_t *c)
 { return oef_init_ex(f, c) == OEF_OK; }
 /** @brief Compatibility wrapper for 2D initialization. */
@@ -505,12 +452,3 @@ bool oef_update2d(oef_filter2d_t *f, oef_vec2_t x, float dt, oef_vec2_t *out)
 /** @brief Compatibility wrapper for 3D variable-rate update. */
 bool oef_update3d(oef_filter3d_t *f, oef_vec3_t x, float dt, oef_vec3_t *out)
 { return oef_update3d_ex(f, x, dt, out) == OEF_OK; }
-/** @brief Compatibility wrapper for scalar fixed-rate update. */
-bool oef_step(oef_filter_t *f, float x, float *out)
-{ return oef_step_ex(f, x, out) == OEF_OK; }
-/** @brief Compatibility wrapper for 2D fixed-rate update. */
-bool oef_step2d(oef_filter2d_t *f, oef_vec2_t x, oef_vec2_t *out)
-{ return oef_step2d_ex(f, x, out) == OEF_OK; }
-/** @brief Compatibility wrapper for 3D fixed-rate update. */
-bool oef_step3d(oef_filter3d_t *f, oef_vec3_t x, oef_vec3_t *out)
-{ return oef_step3d_ex(f, x, out) == OEF_OK; }

@@ -20,6 +20,7 @@ static void test_status_names(void)
     assert(strcmp(oef_status_name(OEF_E_TIME), "OEF_E_TIME") == 0);
     assert(strcmp(oef_status_name(OEF_E_STATE), "OEF_E_STATE") == 0);
     assert(strcmp(oef_status_name(OEF_E_RANGE), "OEF_E_RANGE") == 0);
+    assert(strcmp(oef_status_name(OEF_E_CLOCK), "OEF_E_CLOCK") == 0);
     assert(strcmp(oef_status_name((oef_status_t)-999), "OEF_UNKNOWN") == 0);
     assert(oef_status_message(OEF_OK)[0] != '\0');
     assert(oef_status_message(OEF_E_RANGE)[0] != '\0');
@@ -72,15 +73,13 @@ static void test_config_validation(void)
     assert(!oef_config_valid(&c));
     c = oef_config_default(); c.derivative_cutoff_hz = INFINITY;
     assert(!oef_config_valid(&c));
-    c = oef_config_default(); c.sample_frequency_hz = -2.0f;
-    assert(!oef_config_valid(&c));
     c = oef_config_default(); c.max_cutoff_hz = -0.1f;
     assert(!oef_config_valid(&c));
     c = oef_config_default(); c.max_cutoff_hz = 0.2f;
     assert(!oef_config_valid(&c));
     c = oef_config_default();
     assert(oef_init_ex(&f, &c) == OEF_OK);
-    assert(oef_step_ex(&f, 10.0f, &out) == OEF_OK);
+    assert(oef_update_ex(&f, 10.0f, 0.04f, &out) == OEF_OK);
     c.beta = -1.0f;
     assert(oef_set_config_ex(&f, &c) == OEF_E_CONFIG);
     assert(f.config.beta == 0.5f && f.initialized);
@@ -127,28 +126,22 @@ static void test_scalar_error_atomicity(void)
     assert(out == 5.0f);
 }
 
-/** @brief Non-initialized, invalid config and out-of-range fixed dt. */
+/** @brief Non-initialized, invalid config and manual dt edge cases. */
 static void test_lifecycle_and_extreme_rate(void)
 {
     oef_filter_t filter = {0};
     oef_config_t c = oef_config_default();
     float out = -200.0f;
-    assert(oef_step_ex(&filter, 12.0f, &out) == OEF_E_STATE);
+    assert(oef_update_ex(&filter, 12.0f, 0.04f, &out) == OEF_E_STATE);
     assert(oef_reset_ex(&filter) == OEF_E_STATE);
     assert(oef_init_ex(&filter, &c) == OEF_OK);
     assert(oef_reset_ex(&filter) == OEF_OK);
     assert(!filter.initialized);
-    c.sample_frequency_hz = nextafterf(0.0f, 1.0f);
-    assert(oef_set_config_ex(&filter, &c) == OEF_OK);
-    assert(oef_step_ex(&filter, 12.0f, &out) == OEF_E_RANGE);
-    assert(out == -200.0f && !filter.initialized);
-    c = oef_config_default();
-    assert(oef_set_config_ex(&filter, &c) == OEF_OK);
-    assert(oef_step_ex(&filter, 12.0f, &out) == OEF_OK);
+    assert(oef_update_ex(&filter, 12.0f, 0.04f, &out) == OEF_OK);
     assert(out == 12.0f);
     filter.config.min_cutoff_hz = NAN;
     assert(oef_reset_ex(&filter) == OEF_E_STATE);
-    assert(oef_step_ex(&filter, 15.0f, &out) == OEF_E_STATE);
+    assert(oef_update_ex(&filter, 15.0f, 0.04f, &out) == OEF_E_STATE);
     assert(out == 12.0f);
     assert(oef_init_ex(&filter, &c) == OEF_OK);
 }
@@ -163,8 +156,8 @@ static void test_vector_error_atomicity(void)
     oef_vec3_t b = {3.0f, 4.0f, 5.0f}, out3 = {-100.0f, -101.0f, -102.0f};
     assert(oef_init2d_ex(&xy, &c) == OEF_OK);
     assert(oef_init3d_ex(&xyz, &c) == OEF_OK);
-    assert(oef_step2d_ex(&xy, a, &out2) == OEF_OK);
-    assert(oef_step3d_ex(&xyz, b, &out3) == OEF_OK);
+    assert(oef_update2d_ex(&xy, a, 0.04f, &out2) == OEF_OK);
+    assert(oef_update3d_ex(&xyz, b, 0.04f, &out3) == OEF_OK);
     a.x = NAN; b.z = INFINITY;
     out2.x = out2.y = 101.0f;
     out3.x = out3.y = out3.z = 201.0f;

@@ -21,9 +21,9 @@ extern "C" {
  *  @{ */
 
 /** @brief Semantic-version major number. */
-#define OEF_VERSION_MAJOR 1
+#define OEF_VERSION_MAJOR 2
 /** @brief Semantic-version minor number. */
-#define OEF_VERSION_MINOR 1
+#define OEF_VERSION_MINOR 0
 /** @brief Semantic-version patch number. */
 #define OEF_VERSION_PATCH 0
 
@@ -39,7 +39,8 @@ typedef enum {
     OEF_E_INPUT   = -3, /**< Input sample contains NaN or infinity. */
     OEF_E_TIME    = -4, /**< Sample interval is zero, negative or non-finite. */
     OEF_E_STATE   = -5, /**< Filter not initialized or stored state is invalid. */
-    OEF_E_RANGE   = -6  /**< An intermediate or stored value exceeds float range. */
+    OEF_E_RANGE   = -6, /**< An intermediate or stored value exceeds float range. */
+    OEF_E_CLOCK   = -7  /**< Clock unavailable, callback failed, or invalid timestamp. */
 } oef_status_t;
 
 /**
@@ -52,7 +53,6 @@ typedef struct {
     float min_cutoff_hz;        /**< Minimum low-pass cutoff, >0 Hz. */
     float beta;                 /**< Velocity sensitivity, finite and >=0. */
     float derivative_cutoff_hz; /**< Velocity low-pass cutoff, >0 Hz. */
-    float sample_frequency_hz; /**< Nominal frequency for oef_step*(), >0 Hz. */
     float max_cutoff_hz;        /**< 0 disables cap; otherwise >= min_cutoff_hz. */
 } oef_config_t;
 
@@ -102,7 +102,7 @@ typedef struct {
 
 /**
  * @brief Obtain initial parameter values.
- * @return Config (0.8 Hz, 0.5, 1.0 Hz, 25 Hz, no cutoff cap).
+ * @return Config (0.8 Hz minimum, beta=0.5, 1.0 Hz derivative, no cap).
  * @note Tune the values for the physical units and noise of each application.
  */
 oef_config_t oef_config_default(void);
@@ -235,35 +235,7 @@ oef_status_t oef_update2d_ex(oef_filter2d_t *filter, oef_vec2_t input,
 oef_status_t oef_update3d_ex(oef_filter3d_t *filter, oef_vec3_t input,
                              float dt_seconds, oef_vec3_t *output);
 
-/**
- * @brief Filter one scalar sample at configured sample_frequency_hz.
- * @param[in,out] filter Previously initialized scalar filter.
- * @param[in] input Finite raw sample.
- * @param[out] output Value written on success only.
- * @return OEF_OK or same error codes as oef_update_ex().
- * @note Return OEF_E_RANGE if 1/frequency cannot be represented as float.
- */
-oef_status_t oef_step_ex(oef_filter_t *filter, float input, float *output);
-/**
- * @brief Filter 2D sample using configured sampling rate.
- * @param[in,out] filter Previously initialized 2D filter.
- * @param[in] input Finite vector sample.
- * @param[out] output Filtered vector on success.
- * @return OEF_OK or one of the errors documented by oef_step_ex().
- */
-oef_status_t oef_step2d_ex(oef_filter2d_t *filter, oef_vec2_t input,
-                           oef_vec2_t *output);
-/**
- * @brief Filter 3D sample using configured sampling rate.
- * @param[in,out] filter Previously initialized 3D filter.
- * @param[in] input Finite vector sample.
- * @param[out] output Filtered vector on success.
- * @return OEF_OK or one of the errors documented by oef_step_ex().
- */
-oef_status_t oef_step3d_ex(oef_filter3d_t *filter, oef_vec3_t input,
-                           oef_vec3_t *output);
-
-/* Backward-compatible 1.0 convenience wrappers. They return true only for
+/* Convenience boolean wrappers. They return true only for
  * OEF_OK; use the *_ex functions above for exact error details. */
 
 /** @brief Legacy scalar initializer.
@@ -353,30 +325,134 @@ bool oef_update2d(oef_filter2d_t *filter, oef_vec2_t input, float dt_seconds,
  */
 bool oef_update3d(oef_filter3d_t *filter, oef_vec3_t input, float dt_seconds,
                   oef_vec3_t *output);
-/** @brief Legacy scalar fixed-rate update.
- * @return true on success.
- * @param[in,out] filter Previously initialized filter.
- * @param[in] input Finite scalar or vector input.
- * @param[out] output Written only on success.
- * @return true iff the status-returning step returns OEF_OK.
+
+
+/**
+ * @brief Clock reader callback; timestamp is monotonic seconds.
+ * @param[in] context Opaque user pointer provided when initializing.
+ * @param[out] seconds Timestamp written only on success; must be finite.
+ * @return OEF_OK or a failure status. OEF_E_CLOCK is recommended for errors.
+ * @note Time must never decrease and must have sufficient resolution for
+ *       consecutive measurements. Do not return wall-clock/UTC time.
  */
-bool oef_step(oef_filter_t *filter, float input, float *output);
-/** @brief Legacy 2D fixed-rate update.
- * @return true on success.
- * @param[in,out] filter Previously initialized filter.
- * @param[in] input Finite scalar or vector input.
- * @param[out] output Written only on success.
- * @return true iff the status-returning step returns OEF_OK.
+typedef oef_status_t (*oef_clock_fn)(void *context, double *seconds);
+
+/**
+ * @brief Read built-in monotonic clock (Windows/POSIX), if supported.
+ * @param[in] context Ignored; can be NULL.
+ * @param[out] seconds Monotonic timestamp in seconds on success.
+ * @retval OEF_OK Clock read succeeded.
+ * @retval OEF_E_NULL seconds is NULL.
+ * @retval OEF_E_CLOCK No clock backend, or underlying clock read failed.
+ * @note For RTOS/bare metal, supply an oef_clock_fn instead.
  */
-bool oef_step2d(oef_filter2d_t *filter, oef_vec2_t input, oef_vec2_t *output);
-/** @brief Legacy 3D fixed-rate update.
- * @return true on success.
- * @param[in,out] filter Previously initialized filter.
- * @param[in] input Finite scalar or vector input.
- * @param[out] output Written only on success.
- * @return true iff the status-returning step returns OEF_OK.
+oef_status_t oef_clock_monotonic(void *context, double *seconds);
+
+/** @brief 1D automatic-clock filter; caller-owned and allocation-free. */
+typedef struct {
+    oef_filter_t filter; /**< Underlying scalar filter and configuration. */
+    oef_clock_fn clock;  /**< Callback; NULL means built-in monotonic clock. */
+    void *context;       /**< User pointer passed to clock callback. */
+    double last_seconds; /**< Timestamp of most recent successful update. */
+    bool has_timestamp;  /**< Whether last_seconds is initialized. */
+} oef_auto_filter_t;
+
+/** @brief 2D automatic-clock filter with shared vector cutoff. */
+typedef struct {
+    oef_filter2d_t filter; /**< Underlying vector filter and configuration. */
+    oef_clock_fn clock;    /**< Callback; NULL means built-in monotonic clock. */
+    void *context;         /**< User pointer passed to clock callback. */
+    double last_seconds;   /**< Last committed timestamp in seconds. */
+    bool has_timestamp;    /**< True after successful first update. */
+} oef_auto_filter2d_t;
+
+/** @brief 3D automatic-clock filter with shared vector cutoff. */
+typedef struct {
+    oef_filter3d_t filter; /**< Underlying vector filter and configuration. */
+    oef_clock_fn clock;    /**< Callback; NULL means built-in monotonic clock. */
+    void *context;         /**< User pointer passed to clock callback. */
+    double last_seconds;   /**< Last committed timestamp in seconds. */
+    bool has_timestamp;    /**< True after successful first update. */
+} oef_auto_filter3d_t;
+
+/**
+ * @brief Initialize 1D automatic clock filter.
+ * @param[out] filter Caller-owned writable object.
+ * @param[in] config Valid filter parameters (frequency is not configured).
+ * @param[in] clock User callback or NULL for built-in monotonic clock.
+ * @param[in] context Opaque pointer passed to callback; may be NULL.
+ * @return OEF_OK, OEF_E_NULL or OEF_E_CONFIG. No clock read until update.
  */
-bool oef_step3d(oef_filter3d_t *filter, oef_vec3_t input, oef_vec3_t *output);
+oef_status_t oef_auto_init_ex(oef_auto_filter_t *filter,
+                              const oef_config_t *config,
+                              oef_clock_fn clock, void *context);
+/** @brief Initialize 2D auto-clock filter.
+ * @param[out] filter Caller-owned writable object.
+ * @param[in] config Valid parameters.
+ * @param[in] clock Callback, or NULL for built-in clock.
+ * @param[in] context Callback context.
+ * @return OEF_OK, OEF_E_NULL or OEF_E_CONFIG.
+ */
+oef_status_t oef_auto_init2d_ex(oef_auto_filter2d_t *filter,
+                                const oef_config_t *config,
+                                oef_clock_fn clock, void *context);
+/** @brief Initialize 3D auto-clock filter.
+ * @param[out] filter Caller-owned writable object.
+ * @param[in] config Valid parameters.
+ * @param[in] clock Callback, or NULL for built-in clock.
+ * @param[in] context Callback context.
+ * @return OEF_OK, OEF_E_NULL or OEF_E_CONFIG.
+ */
+oef_status_t oef_auto_init3d_ex(oef_auto_filter3d_t *filter,
+                                const oef_config_t *config,
+                                oef_clock_fn clock, void *context);
+
+/**
+ * @brief Read current clock and filter a scalar, automatically deriving dt.
+ * @param[in,out] filter Initialized auto-filter and timestamp history.
+ * @param[in] input Finite scalar sample.
+ * @param[out] output Written only on success; must not alias filter memory.
+ * @return Core errors, or OEF_E_CLOCK for unusable clock readings;
+ *         OEF_E_TIME for non-increasing intervals, OEF_E_RANGE if elapsed
+ *         positive seconds do not fit into positive finite float.
+ * @note First sample is passed through and its timestamp is stored. On error,
+ *       no history/timestamp/output is changed. Callback side effects cannot
+ *       be rolled back. Timestamps must use the same monotonic time base.
+ */
+oef_status_t oef_auto_update_ex(oef_auto_filter_t *filter,
+                                float input, float *output);
+/** @brief Auto-clock 2D update; same timing/error contracts as scalar.
+ * @param[in,out] filter Initialized auto 2D filter.
+ * @param[in] input Finite coordinates.
+ * @param[out] output Writes filtered coordinates on success only.
+ * @return Status documented by oef_auto_update_ex().
+ */
+oef_status_t oef_auto_update2d_ex(oef_auto_filter2d_t *filter,
+                                  oef_vec2_t input, oef_vec2_t *output);
+/** @brief Auto-clock 3D update; same timing/error contracts as scalar.
+ * @param[in,out] filter Initialized auto 3D filter.
+ * @param[in] input Finite coordinates.
+ * @param[out] output Writes filtered coordinates on success only.
+ * @return Status documented by oef_auto_update_ex().
+ */
+oef_status_t oef_auto_update3d_ex(oef_auto_filter3d_t *filter,
+                                  oef_vec3_t input, oef_vec3_t *output);
+
+/** @brief Reset 1D data and automatic-clock timestamp, preserving config/callback.
+ * @param[in,out] filter Initialized automatic-clock scalar filter.
+ * @return OEF_OK, OEF_E_NULL or OEF_E_STATE.
+ */
+oef_status_t oef_auto_reset_ex(oef_auto_filter_t *filter);
+/** @brief Reset 2D data and timestamp while retaining clock callback.
+ * @param[in,out] filter Initialized auto 2D filter.
+ * @return OEF_OK, OEF_E_NULL or OEF_E_STATE.
+ */
+oef_status_t oef_auto_reset2d_ex(oef_auto_filter2d_t *filter);
+/** @brief Reset 3D data and timestamp while retaining clock callback.
+ * @param[in,out] filter Initialized auto 3D filter.
+ * @return OEF_OK, OEF_E_NULL or OEF_E_STATE.
+ */
+oef_status_t oef_auto_reset3d_ex(oef_auto_filter3d_t *filter);
 
 /** @} */
 #ifdef __cplusplus

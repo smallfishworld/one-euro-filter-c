@@ -1,268 +1,195 @@
 # one-euro-filter-c
 
 [![C CI](https://github.com/smallfishworld/one-euro-filter-c/actions/workflows/ci.yml/badge.svg)](https://github.com/smallfishworld/one-euro-filter-c/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![MIT License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **English** | [简体中文](README.zh-CN.md)
 
-A small, configurable **One Euro Filter (1€ Filter)** library written in **pure C99**. It reduces high-frequency noise in sampled values and coordinates while adapting to fast motion, for applications such as sensor readings, pointer tracking and 2D/3D position measurements.
+A **small, allocation-free C99 library** implementing the *One Euro Filter* for 1D values, 2D points, and 3D positions. Smooth stationary measurement jitter while responding more quickly to meaningful movement. Suitable for sensors, UI pointers and tracking data.
 
-- **1D / 2D / 3D** APIs; each filter instance owns its own state.
-- **Configurable** minimum cutoff, speed coefficient, derivative cutoff, sampling frequency and optional maximum cutoff.
-- Fixed-frequency **`oef_step*()`** and variable-frequency **`oef_update*()`** APIs.
-- Reconfigure and reset at runtime; rejects non-finite values and invalid parameters without modifying the filter state or output.
-- **No allocation, OS calls, or external libraries** (apart from C math functions). Supports embedded/RTOS/bare-metal systems, Linux, Windows and macOS.
-- CMake, Makefile, unit tests, independent runnable examples for all three dimensions, and CI.
+Version **2.0.0** removes the fixed-frequency configuration. You can now choose **automatic monotonic-clock timing** or **explicit per-sample elapsed time**. No fixed Hz value needs to be configured.
 
-## 1. How it works
+## Features
 
-### 1.1 Why not use an ordinary low-pass filter?
+- **Automatic timing:** `oef_auto_update*_ex()` reads a monotonic clock and derives elapsed seconds between *successfully processed* samples.
+- **Explicit timing:** `oef_update*_ex(..., dt_seconds, ...)` for externally timestamped measurements or deterministic processing.
+- **Platform clock:** Linux/macOS use `clock_gettime(CLOCK_MONOTONIC)`; Windows uses `QueryPerformanceCounter`. RTOS/bare metal can supply a caller-provided clock callback.
+- **1D/2D/3D:** vectors use a shared adaptive cutoff derived from vector speed, so the axes retain consistent response when units match.
+- **Configurable parameters:** minimum cutoff, speed coefficient `beta`, derivative cutoff, optional maximum cutoff.
+- Doxygen API comments, documented error codes, transactional failure behavior, no heap/global mutable state, MIT license, cross-platform CI and tests.
 
-An ordinary first-order low-pass filter is:
-
-```math
-y_t = (1-\alpha)y_{t-1} + \alpha x_t
-```
-
-Here `x_t` is the new raw sample, `y_t` is the filtered sample, and `0 < \alpha < 1` controls the trade-off:
-
-- **Small `\alpha`:** less jitter when nearly stationary, but more delay when the input moves.
-- **Large `\alpha`:** faster response to movement, but more noise gets through.
-
-The **One Euro Filter** adjusts `\alpha` every sample based on the **estimated input speed**. Slow signals are strongly smoothed; moving signals get a higher cutoff and less lag.
-
-### 1.2 Step-by-step equations
-
-Let `x_t` be the current sample and `\Delta t` the elapsed time in **seconds**. Each instance retains the previous raw sample, filtered sample, and filtered derivative.
-
-**Step 1 — estimate velocity:**
-
-```math
-v_t = \frac{x_t - x_{t-1}}{\Delta t}
-```
-
-**Step 2 — low-pass the velocity** (to prevent measurement noise from looking like sudden movement):
-
-```math
-\alpha_d = \frac{2\pi f_d\Delta t}{1 + 2\pi f_d\Delta t}
-```
-
-```math
-\hat v_t = \hat v_{t-1} + \alpha_d(v_t-\hat v_{t-1})
-```
-
-Here `f_d` is `derivative_cutoff_hz`.
-
-**Step 3 — compute the adaptive cutoff:**
-
-```math
-f_{c,t} = f_{\min} + \beta |\hat v_t|
-```
-
-- `f_{\min}` = `min_cutoff_hz`, the cutoff when nearly stationary.
-- `\beta` = `beta`, how quickly the cutoff rises with velocity.
-- If `max_cutoff_hz > 0`, clamp `f_{c,t}` to that maximum.
-
-**Step 4 — turn cutoff into smoothing coefficient:**
-
-```math
-\alpha_t = \frac{2\pi f_{c,t}\Delta t}{1 + 2\pi f_{c,t}\Delta t}
-```
-
-This is equivalent to `\alpha = \Delta t/(\Delta t + 1/(2\pi f_c))`.
-
-**Step 5 — filter the new sample:**
-
-```math
-\hat x_t = \hat x_{t-1} + \alpha_t(x_t-\hat x_{t-1})
-```
-
-The **first valid sample passes through unchanged**, and the derivative is initialized to zero.
-
-### 1.3 What changes for 2D and 3D?
-
-This library uses a **shared adaptive cutoff for all axes** of a vector rather than applying two or three unrelated scalar filters.
-
-For 2D, estimate/filter `v_x` and `v_y` as above, then use:
-
-```math
-s_t = \sqrt{\hat v_x^2+\hat v_y^2}
-```
-
-For 3D:
-
-```math
-s_t = \sqrt{\hat v_x^2+\hat v_y^2+\hat v_z^2}
-```
-
-Substitute `s_t` for `|\hat v_t|` in the adaptive cutoff equation. The resulting **same `\alpha_t` is applied to every coordinate**. This makes the filter's response consistent across directions when all axes share the same units. If your axes have different units or need different tuning, use independent 1D filters instead.
-
-### 1.4 Illustrative example
-
-At 60 samples/s (`\Delta t \approx 0.0167` s):
-
-| Cutoff `f_c` | Approximate `\alpha` | Meaning |
-| --- | ---: | --- |
-| 0.8 Hz | 0.077 | Strong smoothing, more lag |
-| 8 Hz | 0.456 | Weaker smoothing, faster response |
-
-These values demonstrate the trade-off; they are not fixed settings. The actual adaptive cutoff depends on velocity, `beta` and any configured cap.
-
-## 2. Getting started
-
-Include the public header:
+## Quick start: 2D auto-timed coordinates
 
 ```c
 #include "one_euro_filter.h"
+#include <stdio.h>
+
+int main(void)
+{
+    oef_config_t config = oef_config_default();
+    oef_auto_filter2d_t filter;
+    oef_vec2_t input = {100.5f, 200.3f};
+    oef_vec2_t output;
+
+    /* NULL uses the built-in OS monotonic clock. No frequency or dt. */
+    oef_status_t status = oef_auto_init2d_ex(&filter, &config, NULL, NULL);
+    if (status != OEF_OK) return 1;
+
+    /* Call for each newly sampled coordinate. */
+    status = oef_auto_update2d_ex(&filter, input, &output);
+    if (status != OEF_OK) {
+        fprintf(stderr, "%s: %s\n", oef_status_name(status),
+                oef_status_message(status));
+        return 1;
+    }
+    printf("(%.3f, %.3f)\n", output.x, output.y);
+    return 0;
+}
 ```
 
-### 2.1 1D — noisy scalar measurements
+**Runnable, generic examples:** [1D scalar](examples/one_dimensional.c) · [2D XY](examples/two_dimensional.c) · [3D XYZ with injected clock](examples/three_dimensional.c).
+
+### 1D auto timing
 
 ```c
-oef_config_t cfg = oef_config_default();
-cfg.sample_frequency_hz = 50.0f;
-
-oef_filter_t filter;
-if (!oef_init(&filter, &cfg)) {
-    /* handle invalid configuration */
-}
-
+oef_config_t config = oef_config_default();
+oef_auto_filter_t filter;
+oef_auto_init_ex(&filter, &config, NULL, NULL);
 float filtered;
-if (oef_step(&filter, 25.12f, &filtered)) {
-    /* use filtered value */
-}
+oef_status_t st = oef_auto_update_ex(&filter, 25.12f, &filtered);
 ```
 
-Runnable source: [examples/one_dimensional.c](examples/one_dimensional.c).
-
-### 2.2 2D — tracking (x, y) coordinates
+### 3D auto timing
 
 ```c
-oef_config_t cfg = oef_config_default();
-cfg.sample_frequency_hz = 60.0f;
-cfg.min_cutoff_hz = 0.8f;
-cfg.beta = 0.05f; /* example for pixel-based coordinates */
+oef_config_t config = oef_config_default();
+oef_auto_filter3d_t filter;
+oef_auto_init3d_ex(&filter, &config, NULL, NULL);
+oef_vec3_t input = {1.02f, 1.98f, 3.01f}, filtered;
+oef_status_t st = oef_auto_update3d_ex(&filter, input, &filtered);
+```
 
+### Explicit elapsed time (no system clock)
+
+If your sensor provides timestamps, calculate the elapsed interval in **seconds** from consecutive captured samples, then call the core directly:
+
+```c
+oef_config_t config = oef_config_default();
 oef_filter2d_t filter;
-if (!oef_init2d(&filter, &cfg)) {
-    /* handle invalid configuration */
-}
-
-oef_vec2_t raw = {100.7f, 199.6f};
-oef_vec2_t smooth;
-if (oef_step2d(&filter, raw, &smooth)) {
-    /* use smooth.x and smooth.y */
-}
+oef_init2d_ex(&filter, &config);
+/* dt_seconds comes from the sensor timestamps, not this library. */
+oef_vec2_t input = {100.5f, 200.3f}, filtered;
+oef_status_t st = oef_update2d_ex(&filter, input, 0.023f, &filtered);
 ```
 
-Runnable source: [examples/two_dimensional.c](examples/two_dimensional.c).
+This API is often **more accurate** than reading time at the processing thread if acquisition and processing can be delayed or queued.
 
-### 2.3 3D — spatial (x, y, z) coordinates
+## How One Euro Filter works
 
-```c
-oef_config_t cfg = oef_config_default();
-cfg.max_cutoff_hz = 8.0f; /* optional maximum cutoff */
+An ordinary first-order low-pass filter uses one smoothing coefficient, forcing a trade-off between stationary stability and motion delay:
 
-oef_filter3d_t filter;
-if (!oef_init3d(&filter, &cfg)) {
-    /* handle invalid configuration */
-}
+\[
+\hat{x}_t = \hat{x}_{t-1} + \alpha (x_t - \hat{x}_{t-1})
+\]
 
-oef_vec3_t raw = {1.02f, 1.98f, 3.01f};
-oef_vec3_t smooth;
-float dt_seconds = 0.021f; /* real time since preceding sample */
-if (oef_update3d(&filter, raw, dt_seconds, &smooth)) {
-    /* use smooth.x, smooth.y and smooth.z */
-}
-```
+The *One Euro Filter* adapts the smoothing coefficient based on the estimated **movement speed**. Each sample follows five steps:
 
-Runnable source: [examples/three_dimensional.c](examples/three_dimensional.c).
+1. **Estimate raw velocity** using the elapsed time (seconds):
 
-## 3. Configuration
+   \[
+   v_t = \frac{x_t-x_{t-1}}{\Delta t}
+   \]
 
-`oef_config_default()` initializes all available fields with **starting values** (not universal best settings):
+2. **Smooth velocity** with derivative cutoff `derivative_cutoff_hz` (= \(f_d\)):
 
-| Field | Default | Valid range | Function |
+   \[
+   \alpha_d = \frac{2\pi f_d\Delta t}{1+2\pi f_d\Delta t},\quad
+   \hat{v}_t=\hat{v}_{t-1}+\alpha_d(v_t-\hat{v}_{t-1})
+   \]
+
+3. **Compute adaptive cutoff** from the filtered speed:
+
+   \[
+   f_{c,t}=f_{\min}+\beta\lvert\hat{v}_t\rvert
+   \]
+
+   If `max_cutoff_hz > 0`, clamp this value to that maximum.
+
+4. **Convert cutoff to a dynamic coefficient**:
+
+   \[
+   \alpha_t=\frac{2\pi f_{c,t}\Delta t}{1+2\pi f_{c,t}\Delta t}
+   \]
+
+5. **Smooth the value**:
+
+   \[
+   \hat{x}_t=\hat{x}_{t-1}+\alpha_t(x_t-\hat{x}_{t-1})
+   \]
+
+For 2D/3D the velocity vector is smoothed per axis, then its Euclidean magnitude \(\sqrt{v_x^2+v_y^2}\) or \(\sqrt{v_x^2+v_y^2+v_z^2}\) determines **one shared** \(\alpha_t\) applied to all axes. Axes should represent the same physical unit; otherwise use independent 1D filters.
+
+**Low speed → small cutoff → stronger smoothing. High speed → larger cutoff → faster response.** This does *not* force a stationary output to remain exactly fixed, and does not correct jumps in an upstream measurement algorithm.
+
+## Configuration
+
+`oef_config_default()` provides illustrative starting values:
+
+| Field | Default | Valid range | Description |
 | --- | ---: | --- | --- |
-| `min_cutoff_hz` | `0.8` | finite, > 0 | Small = smoother at rest, with more lag. |
-| `beta` | `0.5` | finite, ≥ 0 | Large = quicker motion response, but may amplify velocity-related noise. |
-| `derivative_cutoff_hz` | `1.0` | finite, > 0 | Smooths the velocity estimate. |
-| `sample_frequency_hz` | `25.0` | finite, > 0 | Only used by fixed-rate `oef_step*()` functions. |
-| `max_cutoff_hz` | `0.0` | 0, or finite ≥ `min_cutoff_hz` | Optional speed-response cap in Hz; 0 disables it. |
+| `min_cutoff_hz` | `0.8` | finite, > 0 | Lower value = more smoothing at rest, more lag. |
+| `beta` | `0.5` | finite, ≥ 0 | Higher value = faster response to movement; unit-dependent. |
+| `derivative_cutoff_hz` | `1.0` | finite, > 0 | Low-pass cutoff for velocity estimation. |
+| `max_cutoff_hz` | `0` | zero or finite ≥ min cutoff | Optional cap; zero disables cap. |
 
-**Units matter.** Cutoff frequencies are in Hz, and `dt_seconds` is in seconds. Velocity uses **input units per second**, so the numerical tuning of `beta` depends on those units. A filter receiving pixel coordinates cannot necessarily reuse the same `beta` as a filter receiving meters.
+**There is no `sample_frequency_hz` field in v2.0.** Frequencies in the config are *cutoff frequencies* (filter parameters), **not input sampling frequency**. Time intervals are in seconds, velocities in input units per second, and `beta` depends on the units used (pixels vs meters, for example).
 
-**Tuning procedure:**
+A practical tuning sequence: set `beta=0`, adjust minimum cutoff until stationary noise is acceptable; increase `beta` for moving response; adjust derivative cutoff if the speed estimate is too noisy or sluggish; cap the maximum cutoff if desired.
 
-1. Set `beta = 0` (fixed low-pass response). Adjust `min_cutoff_hz` until stationary noise is acceptable.
-2. Increase `beta` incrementally until moving inputs respond quickly enough.
-3. Tune `derivative_cutoff_hz` if the adaptive cutoff reacts too abruptly or too sluggishly to short bursts of motion.
-4. Optionally set `max_cutoff_hz` to limit the maximum speed response. Test with representative real data, not just one input sequence.
+## Automatic time semantics and RTOS integration
 
-## 4. API and behavior
+Automatic filters store the **last successful sample timestamp** separately from the filter's numerical state. The **first valid sample passes through** and stores its time. On any unsuccessful update, neither history nor timestamp nor output is changed; a later sample will span the whole interval since the last successful one. Zero/backward times return `OEF_E_TIME`; invalid/failed clock reads return `OEF_E_CLOCK`; intervals not representable as positive `float` return `OEF_E_RANGE`. Call `oef_auto_reset*_ex()` after stream restart or large pauses to restart the time baseline. Do not call the underlying filter's reset alone when using the auto wrapper.
 
-| Purpose | 1D | 2D | 3D |
-| --- | --- | --- | --- |
-| Initialize | `oef_init` | `oef_init2d` | `oef_init3d` |
-| Update with elapsed time | `oef_update` | `oef_update2d` | `oef_update3d` |
-| Update at configured rate | `oef_step` | `oef_step2d` | `oef_step3d` |
-| Modify parameters | `oef_set_config` | `oef_set_config2d` | `oef_set_config3d` |
-| Reset history | `oef_reset` | `oef_reset2d` | `oef_reset3d` |
-
-- `init`, `set_config`, `update` and `step` return `bool`. On an invalid parameter, `dt` or non-finite input/intermediate value they return `false` without updating state or output.
-- `set_config` preserves history. `reset` clears history while retaining the configuration; the next valid sample passes through unchanged.
-- For **variable sampling intervals**, use `oef_update*()` with real positive `dt_seconds`; `sample_frequency_hz` does not affect these calls. Avoid integer-division mistakes when computing seconds.
-- No internal locking: **each instance can be used independently**, but protect an instance shared across threads.
-- Use `reset` after changing coordinate units, switching to an unrelated signal, or intentionally discarding prior tracking history.
-- The filter reduces *temporal* jitter; it does not fix outliers, inconsistent measurement models, or discontinuities in the raw data. It does not mathematically force stationary output to be constant.
-
-
-### 4.1 Stable error codes and stronger API contracts (v1.1.0)
-
-For production integrations, prefer the new **`*_ex`** functions. They return `oef_status_t` (success = `OEF_OK == 0`, failure = a **negative library-specific code**), instead of the former `bool` result. Error codes do **not** represent POSIX `errno`.
-
-| Status | Value | Meaning |
-| --- | ---: | --- |
-| `OEF_OK` | 0 | Success |
-| `OEF_E_NULL` | -1 | Required pointer is NULL |
-| `OEF_E_CONFIG` | -2 | Invalid proposed configuration |
-| `OEF_E_INPUT` | -3 | Input is NaN or infinity |
-| `OEF_E_TIME` | -4 | Invalid or non-positive sample interval |
-| `OEF_E_STATE` | -5 | Uninitialized/corrupt filter state or active configuration |
-| `OEF_E_RANGE` | -6 | Intermediate/output cannot be represented safely as float |
+On embedded systems, implement a high-resolution **monotonic** callback. Its `double` result is in seconds, and the callback must fill `*seconds` and return `OEF_OK`:
 
 ```c
-oef_config_t cfg = oef_config_default();
-oef_filter2d_t filter;
-oef_status_t st = oef_init2d_ex(&filter, &cfg);
-if (st != OEF_OK) {
-    /* Initialization failure: config or pointers should be checked. */
+/* Replace tick_count() / ticks_per_second with your actual RTOS API. */
+typedef struct { double ticks_per_second; } clock_config_t;
+
+oef_status_t my_rtos_clock(void *ctx, double *seconds)
+{
+    clock_config_t *c = (clock_config_t *)ctx;
+    if (c == NULL || seconds == NULL || c->ticks_per_second <= 0.0)
+        return OEF_E_CLOCK;
+    /* Ensure the underlying tick counter handles wraparound. */
+    *seconds = (double)tick_count() / c->ticks_per_second;
+    return OEF_OK;
 }
 
-oef_vec2_t point = {100.7f, 199.6f};
-oef_vec2_t smooth;
-st = oef_update2d_ex(&filter, point, 1.0f / 60.0f, &smooth);
-if (st == OEF_OK) {
-    /* Use smooth.x and smooth.y. */
-} else {
-    /* Safe, constant strings; no allocation or global last-error state. */
-    /* Log oef_status_name(st), oef_status_message(st). */
-}
+clock_config_t timer = {1000.0};
+oef_auto_filter2d_t tracker;
+oef_config_t config = oef_config_default();
+oef_auto_init2d_ex(&tracker, &config, my_rtos_clock, &timer);
 ```
 
-**Failure atomicity:** invalid configuration, NaN/Inf, bad `dt`, corrupted stored values or numeric overflow result in an error **without advancing history or writing output**. Calculation uses `double` intermediates and checks the representability of persisted `float` state. The required contract is to **initialize each instance first** and avoid sharing an instance between threads without synchronization.
+`tick_count()` is **pseudocode**: provide a real tick counter and rollover/overflow handling for your target. On unsupported hosts, passing `NULL` as the clock callback returns `OEF_E_CLOCK` on update rather than falling back to wall time. A monotonic clock is required; **do not use local time, UTC time, or a clock subject to NTP/user adjustments**.
 
-**Backward compatibility:** the original `bool` `oef_init*`, `oef_set_config*`, `oef_step*`, `oef_update*` methods are kept and return `true` exactly for `OEF_OK`. Original `void` resets remain and discard the error; `oef_reset*_ex` reports it. Public structs and their field layout are unchanged.
+If the callback returns success but an invalid or unwritten timestamp, the library reports `OEF_E_CLOCK`. If the interval is 0 or negative, it reports `OEF_E_TIME`. For automatic mode the clock must represent **when the sample was acquired**, or as close to that time as possible; for asynchronous pipelines with acquisition timestamps, prefer the explicit `dt` API.
 
-See the [API contract / error-handling reference](docs/API.md), [changelog](CHANGELOG.md), and [contribution guidelines](CONTRIBUTING.md). Public declarations, structures, fields and all functions have Doxygen comments. The documentation conventions are inspired by [Zephyr's C API and Doxygen guidelines](https://docs.zephyrproject.org/latest/develop/api/design_guidelines.html); the status convention is inspired by [libuv's error handling](https://docs.libuv.org/en/stable/errors.html), without depending on either project.
+## API and errors
 
-### 4.2 Testing and portability
+| Action | Scalar | 2D | 3D |
+| --- | --- | --- | --- |
+| Explicit elapsed time | `oef_update_ex` | `oef_update2d_ex` | `oef_update3d_ex` |
+| Auto-clock initialization | `oef_auto_init_ex` | `oef_auto_init2d_ex` | `oef_auto_init3d_ex` |
+| Auto-clock update | `oef_auto_update_ex` | `oef_auto_update2d_ex` | `oef_auto_update3d_ex` |
+| Auto-clock reset | `oef_auto_reset_ex` | `oef_auto_reset2d_ex` | `oef_auto_reset3d_ex` |
+| Core filter initialization | `oef_init_ex` | `oef_init2d_ex` | `oef_init3d_ex` |
+| Core configuration | `oef_set_config_ex` | `oef_set_config2d_ex` | `oef_set_config3d_ex` |
 
-The project includes backward-compatibility tests, precise-error/rollback checks, invalid pointer/configuration tests, extreme numeric cases, deterministic 25,000-sample stress tests and standalone 1D/2D/3D smoke tests. GitHub Actions builds on Ubuntu, macOS and Windows plus a Linux **AddressSanitizer (ASan)** / **UndefinedBehaviorSanitizer (UBSan)** job. Optional `OEF_ENABLE_SANITIZERS=ON` enables instrumented CMake builds with Clang/GCC; `OEF_BUILD_DOCS=ON` generates Doxygen documentation where Doxygen is available.
+Status codes: `OEF_OK = 0`; `OEF_E_NULL = -1`; `OEF_E_CONFIG = -2`; `OEF_E_INPUT = -3`; `OEF_E_TIME = -4`; `OEF_E_STATE = -5`; `OEF_E_RANGE = -6`; `OEF_E_CLOCK = -7`. Use `oef_status_name()` / `oef_status_message()` for diagnostic strings. Old `bool` manual-time wrappers remain available; fixed-frequency `oef_step*()` was removed with the frequency field. See [docs/API.md](docs/API.md) for detailed contracts.
 
-## 5. Build and run
-
-### CMake (Linux / macOS / Windows)
+## Build and run
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
@@ -270,47 +197,33 @@ cmake --build build --config Debug --parallel
 ctest --test-dir build -C Debug --output-on-failure
 ```
 
-CTest runs both unit-test suites **and** smoke-tests all three independent examples.
+On Unix-like systems, `make test` and `make example` are also supported. Executables: `oef_example_1d`, `oef_example_2d`, and `oef_example_3d`. For embedded integration compile `src/one_euro_filter.c`, `src/one_euro_auto.c` and `src/one_euro_clock.c` with `include/`; `one_euro_clock.c` has an unsupported-platform stub when no native monotonic clock is available. You can also link only `src/one_euro_filter.c` if you exclusively use explicit-`dt` APIs.
 
-Executable names: `oef_example_1d`, `oef_example_2d`, `oef_example_3d`.
+For strict code checks, compile with `-std=c99 -Wall -Wextra -Wpedantic -Werror`; use `-DOEF_ENABLE_SANITIZERS=ON` with supported GCC/Clang compilers. See [CONTRIBUTING.md](CONTRIBUTING.md) and [CHANGELOG.md](CHANGELOG.md).
 
-On Linux/macOS you can run, for example:
+## Migration from v1.1
 
-```sh
-./build/oef_example_1d
-./build/oef_example_2d
-./build/oef_example_3d
+**This is a breaking change.** Replace old fixed-frequency calls:
+
+```c
+/* v1.1: cfg.sample_frequency_hz = 60.0f; */
+/* v1.1: oef_step2d_ex(&filter, point, &output); */
+
+/* v2: choose auto timing (no sample rate required) */
+oef_auto_filter2d_t auto_filter;
+oef_auto_init2d_ex(&auto_filter, &cfg, NULL, NULL);
+oef_auto_update2d_ex(&auto_filter, point, &output);
+
+/* OR choose explicit sampling interval (seconds): */
+oef_filter2d_t timed_filter;
+oef_init2d_ex(&timed_filter, &cfg);
+oef_update2d_ex(&timed_filter, point, 1.0f/60.0f, &output);
 ```
 
-With a multi-config generator on Windows, executables commonly live in `build/Debug/`.
+Config layout changed from **five** fields to **four** and the fixed-frequency `oef_step*` APIs have been removed. Rebuild all consuming software against v2.0 headers and library. The original manual-time `oef_update*` APIs remain supported.
 
-### Makefile (Unix-like systems)
+## References and license
 
-```sh
-make
-make test
-make example   # builds and runs all three examples
-```
+The original algorithm was introduced by Casiez, Roussel and Vogel in *1€ Filter: A Simple Speed-based Low-pass Filter for Noisy Input in Interactive Systems* (CHI 2012). [Authors' reference page](https://cristal.univ-lille.fr/~casiez/1euro/).
 
-### Embed without a build system
-
-Compile `src/one_euro_filter.c` and add `include/` to the compiler's include search path. Some platforms need `-lm` for the math library.
-
-### Install / link with CMake
-
-```sh
-cmake --install build --prefix /your/install/prefix
-```
-
-```cmake
-find_package(one_euro_filter 1.0 CONFIG REQUIRED)
-target_link_libraries(your_target PRIVATE one_euro_filter::one_euro_filter)
-```
-
-## 6. References and license
-
-The algorithm was introduced by Casiez, Roussel and Vogel in *1€ Filter: A Simple Speed-based Low-pass Filter for Noisy Input in Interactive Systems* (CHI 2012). See the [authors' 1€ Filter page](https://cristal.univ-lille.fr/~casiez/1euro/) for the paper and original materials.
-
-The scalar formulation follows the standard One Euro Filter idea. The **shared vector-speed cutoff for 2D/3D** and optional **maximum cutoff** are implementation choices of this library.
-
-Released under the [MIT License](LICENSE). Version **1.1.0** extends the original v1.0 API without breaking the existing call signatures.
+[MIT License](LICENSE).

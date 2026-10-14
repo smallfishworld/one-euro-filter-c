@@ -1,26 +1,26 @@
 /* SPDX-License-Identifier: MIT */
-/** @file one_dimensional.c @brief Scalar sensor reading smoothing example. */
+/** @file one_dimensional.c @brief Automatic-clock scalar smoothing example. */
 #include "one_euro_filter.h"
 #include <stdio.h>
 
-/** @brief Initialize a filter and process simulated noisy samples. */
+/** @brief Filter independent 1D measurements without sample-rate configuration. */
 int main(void)
 {
-    const float readings[] = {25.0f, 25.1f, 24.9f, 25.2f, 26.1f, 26.0f};
+    const float measurements[] = {25.00f, 25.10f, 24.90f, 25.20f, 26.10f};
     oef_config_t config = oef_config_default();
-    oef_filter_t filter;
+    oef_auto_filter_t filter;
     unsigned int i;
-    config.sample_frequency_hz = 50.0f;
-    if (oef_init_ex(&filter, &config) != OEF_OK) return 1;
-    for (i = 0U; i < sizeof(readings) / sizeof(readings[0]); ++i) {
-        float output;
-        oef_status_t result = oef_step_ex(&filter, readings[i], &output);
-        if (result != OEF_OK) {
-            fprintf(stderr, "%s: %s\n", oef_status_name(result),
-                    oef_status_message(result));
+    oef_status_t status = oef_auto_init_ex(&filter, &config, NULL, NULL);
+    if (status != OEF_OK) return 1;
+    for (i = 0U; i < sizeof(measurements)/sizeof(measurements[0]); ++i) {
+        float filtered;
+        status = oef_auto_update_ex(&filter, measurements[i], &filtered);
+        if (status != OEF_OK) {
+            fprintf(stderr, "%s: %s\n", oef_status_name(status),
+                    oef_status_message(status));
             return 1;
         }
-        printf("1D sample %u: input=%.3f output=%.3f\n", i, readings[i], output);
+        printf("1D input=%7.3f output=%7.3f\n", measurements[i], filtered);
     }
     return 0;
 }
