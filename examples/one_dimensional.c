@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /** @file one_dimensional.c @brief Automatic-clock scalar smoothing example. */
 #include "one_euro_filter.h"
+#include "example_clock.h"
 #include <stdio.h>
 
 /** @brief Filter independent 1D measurements without sample-rate configuration. */
@@ -10,7 +11,9 @@ int main(void)
     oef_config_t config = oef_config_default();
     oef_auto_filter_t filter;
     unsigned int i;
-    oef_status_t status = oef_auto_init_ex(&filter, &config, NULL, NULL);
+    oef_example_clock_t demo_clock = {0.0, 0.020};
+    oef_status_t status = oef_auto_init_ex(&filter, &config,
+                                             oef_example_clock, &demo_clock);
     if (status != OEF_OK) return 1;
     for (i = 0U; i < sizeof(measurements)/sizeof(measurements[0]); ++i) {
         float filtered;

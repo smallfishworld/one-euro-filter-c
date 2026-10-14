@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /** @file two_dimensional.c @brief Generic XY coordinate auto-timing. */
 #include "one_euro_filter.h"
+#include "example_clock.h"
 #include <stdio.h>
 
 /** @brief Demonstrate automatic timing and 2D vector filtering. */
@@ -14,8 +15,10 @@ int main(void)
     oef_auto_filter2d_t filter;
     unsigned int i;
     oef_status_t status;
+    oef_example_clock_t demo_clock = {0.0, 0.016};
     config.beta = 0.05f; /* Example coordinates in pixels. */
-    status = oef_auto_init2d_ex(&filter, &config, NULL, NULL);
+    status = oef_auto_init2d_ex(&filter, &config,
+                                oef_example_clock, &demo_clock);
     if (status != OEF_OK) return 1;
     for (i = 0U; i < sizeof(points)/sizeof(points[0]); ++i) {
         oef_vec2_t filtered;

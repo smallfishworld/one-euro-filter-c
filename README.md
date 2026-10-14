@@ -47,6 +47,8 @@ int main(void)
 }
 ```
 
+The runnable examples use a **deterministic simulated monotonic clock** so that very fast consecutive demonstration calls still have positive elapsed time; production code can use the default OS clock by passing `NULL`.
+
 **Runnable, generic examples:** [1D scalar](examples/one_dimensional.c) · [2D XY](examples/two_dimensional.c) · [3D XYZ with injected clock](examples/three_dimensional.c).
 
 ### 1D auto timing

@@ -47,6 +47,8 @@ int main(void)
 }
 ```
 
+示例循环连续运行得很快，部分平台的系统时钟可能对连续两次读取返回相同时间，因此三个示例使用**模拟单调时钟回调**，产生确定的非零时间间隔。生产代码传入 `NULL` 时则直接使用操作系统单调时钟。
+
 提供三个独立、通用的可运行示例：[一维数值](examples/one_dimensional.c)、[二维坐标](examples/two_dimensional.c)、[三维坐标及自定义时钟](examples/three_dimensional.c)。
 
 ### 一维（1D）自动计时
