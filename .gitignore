@@ -8,3 +8,4 @@ cmake-build-*/
 *.exe
 *.pdb
 .DS_Store
+.claude/
